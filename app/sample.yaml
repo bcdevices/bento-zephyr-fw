@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+sample:
+  name: LY10 Demo
+tests:
+  test:
+    harness: bluetooth
+    platform_whitelist: ly10demo qemu_cortex_m3 qemu_x86
+    tags: bluetooth
+    depends_on: pwm spi gpio

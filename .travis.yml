@@ -1,0 +1,26 @@
+sudo: required
+language: c
+services:
+- docker
+env:
+  global:
+  - PROJECT_UUID=0572314c-bd21-11e9-8c83-024f4387ee42
+  - secure: luLnl9x9N73Lz8m5HxSORzR/F7acyabyZaRfZapBt85HnfPL9TqW87jEuvd9fmcx+i9Pjz8UNS8Qj1tz+wlpJCFYRe4r31Mo+spgLwoMn8GRYsIyuxOUeIoGLT0TJfvcyQReuhoUZpDRuDEcg3CgSJdpqgu2VPnui0GzRapjzVuc2CvohbHhQC73hpm+jhono39uB/7cGk1abW5gg/q/0iWJEZteqQc5izsc9SzmwWTWTRNSHadkwoe56LPH5DUN1J1uoKxeX/1wT0VGtYksGx3KHcNBc3CkpS7dD3syhXrBccYb78KSL9HS4GVscy7k5uMO9PKhk3C2nhyUl5cwiHCie6ZhDEO8oLnX3KXIYRA3xq8/xHAXlE6f2jPQq7mIZruhq4tQnwDahwurkpR7sXfJWWjPoqMUztH7pv/yzv1t/xv1vLOgxmciMPM80rukyDr+uMfGo5/ji/gguy6VnF1BP8etwPyo+KfAXtGmQVUpNHe14G2MTfryhdhXdqunQ9iHjy8Hv/oWX8wNJyyNY/SPyJj5SF/5vp7mA8udfuq1fzU1qkSUrwIEkqHX0pgzn3wEeCIkSDSyKpyCdYr3qrLrex5AmyxUq/66F9Epm5KctEj93z8OwFTm4f0/7pdWNPsmb/y0snsel46AybQtP/T33PYWR7T3jC9d+2zi5Dk=
+script:
+- make docker
+before_deploy:
+- sudo apt-get update
+- sudo apt-get install -y musl
+- wget https://download.pltcloud.com/cli/pltcloud_0.3.0_amd64.deb
+- sudo dpkg -i pltcloud*_amd64.deb
+deploy:
+- provider: script
+  skip_cleanup: true
+  script: make deploy
+  on:
+    repo: bcdevices/ly10-zephyr-fw
+    all_branches: true
+    tags: true
+notifications:
+  slack:
+    secure: GgjfEaZ2DpRNDNgG0u+JlSwwU5GGFpfBL4ExsRYvCo+N5Q0d3vmIqj1sQtoXWn6L9++pyEL19D8D+Rvtx3P+WHIDvRN/Qaj991+iOwWsjmWYx91UdjpTQx+Evjlem9+ekRI8/PsbruspkpAr3l2n3yzhndP5aa7L2kGA7sEp3x3qcNaU+eQUcuIsv7TmwahEsKX0BWqOm34e2ESlUBoqOYyn24cVceKukuaetf20WpRQR8JKGpQnFWeXqHugLmw8mjE8LCdMqbPCDXssfKxrzxixMUPDyU14XD8FAVLlSBUwj50j5P+FQd5wvjoALDIbozyW5r9I1MiGGcFfaBDc57uJAdKHJGeupdri2xXXCqvU4ROdDyRqr+kCcL0ypEsjtTZolxvPc3oqoihkhiIg1W7ud/95JmD7pkJfuO1LbSZFn5EF2+KajW5ewpzuElKvq5axEgVXZNYFXliAThdVzs5qYPU2vkpmWu8lpjKgW90jzaP6H/8UqRI0UocdSF2D6Buen0FysesHNKLDIW1113DRF9Y//lwQTDjuRVbYS8WzGDrsTOs/Jren3CXTqJ2ykgoJ7oEGuRzbtCdS41KYF4+ot4i1ZqUunRlkPNaWGPfZDvQForuxfEvbIPFOejW9rVY9qW1YFjyL0BaiyjKtBFRsIYZaq3P0WOdrdeu+mfc=
