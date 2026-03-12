@@ -1,17 +1,11 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
 //
-// Copyright (c) 2021 Blue Clover Devices
+// Copyright (c) 2021-2026 Blue Clover Devices
 //
 
 /*
- * @brief Setup environmental sensor, if present.
+ * @brief Setup BME280 environmental sensor and print initial reading.
  * @return 0 on success, non-zero on failure.
  */
-int app_sensor_evironmental_setup(void);
-
-/*
- * @brief Setup motion sensor, if present.
- * @return 0 on success, non-zero on failure.
- */
-int app_sensor_motion_setup(void);
+int app_sensor_environmental_setup(void);

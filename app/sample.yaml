@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 sample:
-  name: LY10 Demo
+  name: Bento Demo
 tests:
   test:
-    harness: bluetooth
-    platform_whitelist: ly10demo qemu_cortex_m3 qemu_x86
-    tags: bluetooth
-    depends_on: pwm spi gpio
+    platform_allow: bento/rp2350b/m33
+    tags: sensor pwm gpio
+    depends_on: pwm spi gpio i2c
