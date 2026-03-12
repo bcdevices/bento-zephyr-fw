@@ -1,0 +1,6 @@
+board:
+  name: bento
+  full_name: Blue Clover Bento Demo Board
+  vendor: blueclover
+  socs:
+  - name: rp2350b

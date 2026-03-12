@@ -1,0 +1,154 @@
+/*
+ * Copyright (c) 2026 Blue Clover Devices
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <raspberrypi/rpi_pico/rp2350b.dtsi>
+#include <raspberrypi/rpi_pico/m33.dtsi>
+
+#include <freq.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/led/led.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+#include "bento-pinctrl.dtsi"
+
+/ {
+	model = "Blue Clover Bento Demo Board";
+	compatible = "blueclover,bento";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,flash-controller = &qmi;
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		zephyr,code-partition = &code_partition;
+	};
+
+	aliases {
+		watchdog0 = &wdt0;
+		led-strip = &ws2812;
+		pwm-buzzer = &pwm;
+	};
+
+	/* RGB_5V_IN power enable via relay on GPIO35 (RP_S1 / RELAY_S_IN) */
+	relay_5v: relay-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "relay_5v";
+		enable-gpios = <&gpio0_hi 3 GPIO_ACTIVE_LOW>;
+		regulator-boot-on;
+	};
+};
+
+&flash0 {
+	reg = <0x10000000 DT_SIZE_M(4)>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Image definition block at start of flash */
+		image_def: partition@0 {
+			label = "image_def";
+			reg = <0x00000000 0x100>;
+			read-only;
+		};
+
+		/* Usable code partition */
+		code_partition: partition@100 {
+			label = "code-partition";
+			reg = <0x100 (DT_SIZE_M(4) - 0x100)>;
+			read-only;
+		};
+	};
+};
+
+&uart0 {
+	current-speed = <115200>;
+	status = "okay";
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+gpio0_lo: &gpio0 {
+	status = "okay";
+};
+
+&gpio0_hi {
+	status = "okay";
+};
+
+&i2c0 {
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * SPI0: BME280 environmental sensor (SENS_SPI)
+ * SCK=GP6, TX(MOSI)=GP7, RX(MISO)=GP4, CS=GP5 (RP_SPIS_SS / CS_BME280)
+ */
+&spi0 {
+	pinctrl-0 = <&spi0_default>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpio0_lo 5 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	bme280: bme280@0 {
+		compatible = "bosch,bme280";
+		reg = <0>;
+		spi-max-frequency = <5000000>;
+	};
+};
+
+/* PWM: buzzer driven via MMBT3904 on GP29 (AUDIO_IN), channel 6B */
+&pwm {
+	pinctrl-0 = <&pwm_ch6b_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&timer0 {
+	status = "okay";
+};
+
+&wdt0 {
+	status = "okay";
+};
+
+zephyr_udc0: &usbd {
+	status = "okay";
+};
+
+/*
+ * PIO1 drives the WS2812-compatible RGB LED (LTST-E683CEGBW) via a
+ * SN74LVC1G125 level shifter on GPIO36 (RP_S2 / RGB_D_IN).
+ */
+&pio1 {
+	status = "okay";
+
+	pio-ws2812 {
+		compatible = "worldsemi,ws2812-rpi_pico-pio";
+		status = "okay";
+		pinctrl-0 = <&pio1_ws2812_default>;
+		pinctrl-names = "default";
+		bit-waveform = <3>, <3>, <4>;
+
+		ws2812: ws2812 {
+			status = "okay";
+			gpios = <&gpio0_hi 4 GPIO_ACTIVE_HIGH>;
+			chain-length = <1>;
+			color-mapping = <LED_COLOR_ID_GREEN
+					 LED_COLOR_ID_RED
+					 LED_COLOR_ID_BLUE>;
+			reset-delay = <280>;
+			frequency = <800000>;
+		};
+	};
+};

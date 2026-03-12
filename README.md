@@ -1,31 +1,22 @@
-# ly10-zephyr-fw
+# sbu3-zephyr-fw
 
-Zephyr-based firmware PLT Demo (v2)
+Zephyr-based firmware for the Blue Clover Devices Bento board (plt demo board v3)
 
 - Build platform: macOS, Linux
 - Host platform: PLT Demo (v2) (nRF52)
 - Target platform: PLT Demo (v2) (nRF52)
 
-## Docker build
+## Status
 
-### Prerequisites
+- [ ] Blinky application for RP2350B
+- [ ] Programming RP2350B
+- [ ] Update app/ folder to work with all devices present (this is currently a copy of the PLTv2 application)
 
-- Linux hosts or Apple Mac computer running macOS
-- Docker
+## Building the Project
 
-### Docker build instructions
+### Local build
 
-From terminal, execute
-
-```
-make docker
-```
-
-to end up with build artifacts in `dist/`
-
-## Local build
-
-### Prerequisites
+#### Prerequisites
 
 - Linux hosts or Apple Mac computer running macOS
 - Linux:
@@ -42,7 +33,7 @@ to end up with build artifacts in `dist/`
       This will install the toolchain in `/Applications/ARM`
     - `brew install cmake ninja gperf python3 ccache qemu dtc`
 
-### Local build instructions
+#### Local build instructions
 
 - Linux:
     - `export ZEPHYR_TOOLCHAIN_VARIANT="zephyr"`
@@ -52,6 +43,21 @@ to end up with build artifacts in `dist/`
     - `export GNUARMEMB_TOOLCHAIN_PATH="/Applications/ARM"`
 - `make prereq` to install build pre-requisites
 - `make dist` to end up with build artifacts in `dist/`
+
+### Docker build
+
+Prerequisites:
+
+- Linux hosts or Apple Mac computer running macOS
+- Docker
+
+From terminal, execute
+
+```sh
+make docker
+```
+
+to end up with build artifacts in `dist/`
 
 ## Links
 

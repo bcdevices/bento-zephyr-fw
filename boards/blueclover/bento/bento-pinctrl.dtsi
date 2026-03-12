@@ -1,0 +1,75 @@
+/*
+ * Copyright (c) 2026 Blue Clover Devices
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2350b-pinctrl.h>
+
+/*
+ * Workaround: Zephyr's rp2350 pinctrl header defines UART0_TX_P18 and
+ * UART0_RX_P19 using RP2_PINCTRL_GPIO_FUNC_UART_ALT, which is never
+ * defined. The correct value is function 11 (UART_AUX).
+ */
+#ifndef RP2_PINCTRL_GPIO_FUNC_UART_ALT
+#define RP2_PINCTRL_GPIO_FUNC_UART_ALT RP2_PINCTRL_GPIO_FUNC_UART_AUX
+#endif
+
+&pinctrl {
+	/*
+	 * UART0: TX=GP18 (SCI3_TXD / RP_TX0), RX=GP19 (SCI3_RXD / RP_RX0)
+	 * GP18/19 use the alternate UART function (function 11).
+	 */
+	uart0_default: uart0_default {
+		group1 {
+			pinmux = <UART0_TX_P18>;
+		};
+		group2 {
+			pinmux = <UART0_RX_P19>;
+			input-enable;
+		};
+	};
+
+	/*
+	 * I2C0: SDA=GP20, SCL=GP21 (SENS_I2C / Qwiic)
+	 * Directly on the SENS_I2C bus shared with Qwiic connectors.
+	 */
+	i2c0_default: i2c0_default {
+		group1 {
+			pinmux = <I2C0_SDA_P20>, <I2C0_SCL_P21>;
+			input-enable;
+			input-schmitt-enable;
+		};
+	};
+
+	/*
+	 * SPI0: used for BME280 (SENS_SPI)
+	 * SCK=GP6, TX(MOSI)=GP7, RX(MISO)=GP4
+	 * CS is managed via GPIO (GP5 / RP_SPIS_SS) in the board DTS.
+	 */
+	spi0_default: spi0_default {
+		group1 {
+			pinmux = <SPI0_SCK_P6>, <SPI0_TX_P7>;
+		};
+		group2 {
+			pinmux = <SPI0_RX_P4>;
+			input-enable;
+		};
+	};
+
+	/* PWM: buzzer on GP29 (AUDIO_IN -> RP_PWM0), channel 6B */
+	pwm_ch6b_default: pwm_ch6b_default {
+		group1 {
+			pinmux = <PWM_6B_P29>;
+		};
+	};
+
+	/*
+	 * PIO1 WS2812: RGB_D_IN driven from RP_S2 = GPIO36
+	 * Signal path: GPIO36 -> SN74LVC1G125 level shifter -> LTST-E683CEGBW
+	 */
+	pio1_ws2812_default: pio1_ws2812_default {
+		group1 {
+			pinmux = <PIO1_P36>;
+		};
+	};
+};

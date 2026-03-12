@@ -1,0 +1,6 @@
+name: bento-fw
+build:
+  cmake: .
+  kconfig: Kconfig
+boards:
+  root: .

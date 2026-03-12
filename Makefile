@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-PRJTAG := ly10-zephyr-fw
+PRJTAG := bento-zephyr-fw
 
 # Makefile default shell is /bin/sh which does not implement `source`.
 SHELL := /bin/bash
@@ -28,29 +28,47 @@ DOCKER_BUILD_ARGS += --network=host
 DOCKER_RUN_ARGS :=
 DOCKER_RUN_ARGS += --network=none
 
-ZEPHYR_TAG := 3.0.0
+ZEPHYR_TAG := 4.3.0
 ZEPHYR_SYSROOT := /usr/src/zephyr-$(ZEPHYR_TAG)/zephyr
 ZEPHYR_USRROOT := $(HOME)/src/zephyr-$(ZEPHYR_TAG)/zephyr
+ZEPHYR_LOCALROOT := $(BASE_PATH)/zephyrproject/zephyr
+
+BOARD_ROOT := $(BASE_PATH)
 
 BOARDS_APP :=
-BOARDS_APP += blueclover_plt_demo_v2_nrf52832
+BOARDS_APP += bento/rp2350b/m33
 
 APP_TARGETS := $(patsubst %,build.%/app/zephyr/zephyr.hex,$(BOARDS_APP))
+BLINKY_TARGETS := $(patsubst %,build.%/blinky/zephyr/zephyr.hex,$(BOARDS_APP))
 
 build.%/app/zephyr/zephyr.hex:
 	if [ -d $(ZEPHYR_USRROOT) ]; then source $(ZEPHYR_USRROOT)/zephyr-env.sh ; \
 	elif [ -d $(ZEPHYR_SYSROOT) ]; then source $(ZEPHYR_SYSROOT)/zephyr-env.sh ; \
+	elif [ -d $(ZEPHYR_LOCALROOT) ]; then source $(ZEPHYR_LOCALROOT)/zephyr-env.sh ; \
 	else echo "No Zephyr"; fi && \
-          west build --build-dir build.$*/app --pristine auto \
-	  --board $* app
+	west build --build-dir build.$*/app --pristine auto \
+	  --board $* -s app $(WEST_BOARD_ROOT)
+
+build.%/blinky/zephyr/zephyr.hex:
+	if [ -d $(ZEPHYR_USRROOT) ]; then source $(ZEPHYR_USRROOT)/zephyr-env.sh ; \
+	elif [ -d $(ZEPHYR_SYSROOT) ]; then source $(ZEPHYR_SYSROOT)/zephyr-env.sh ; \
+	elif [ -d $(ZEPHYR_LOCALROOT) ]; then source $(ZEPHYR_LOCALROOT)/zephyr-env.sh ; \
+	else echo "No Zephyr"; fi && \
+	west build --build-dir build.$*/blinky --pristine auto \
+	  --board $* -s blinky $(WEST_BOARD_ROOT)
 
 .PHONY: versions
 versions:
 	@echo "GIT_DESC: $(GIT_DESC)"
 	@echo "VERSION_TAG: $(VERSION_TAG)"
 
+WEST_BOARD_ROOT := -- -DBOARD_ROOT=$(BOARD_ROOT)
+
 .PHONY: build
 build: $(APP_TARGETS)
+
+.PHONY: blinky
+blinky: $(BLINKY_TARGETS)
 
 .PHONY: clean
 clean:
@@ -62,7 +80,7 @@ prereq:
 	install -d zephyrproject
 	cd zephyrproject && west init --mr v$(ZEPHYR_TAG)
 	cd zephyrproject && west update
-	pip3 install -r $(ZEPHYR_USRROOT)/scripts/requirements.txt
+	pip3 install -r $(ZEPHYR_LOCALROOT)/scripts/requirements.txt
 
 .PHONY: dist-prep
 dist-prep:
