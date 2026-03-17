@@ -41,21 +41,37 @@ BOARDS_APP += bento/rp2350b/m33
 APP_TARGETS := $(patsubst %,build.%/app/zephyr/zephyr.hex,$(BOARDS_APP))
 BLINKY_TARGETS := $(patsubst %,build.%/blinky/zephyr/zephyr.hex,$(BOARDS_APP))
 
-build.%/app/zephyr/zephyr.hex:
+# Helper to source the Zephyr env from whichever root exists
+define source-zephyr
 	if [ -d $(ZEPHYR_USRROOT) ]; then source $(ZEPHYR_USRROOT)/zephyr-env.sh ; \
 	elif [ -d $(ZEPHYR_SYSROOT) ]; then source $(ZEPHYR_SYSROOT)/zephyr-env.sh ; \
 	elif [ -d $(ZEPHYR_LOCALROOT) ]; then source $(ZEPHYR_LOCALROOT)/zephyr-env.sh ; \
-	else echo "No Zephyr"; fi && \
-	west build --build-dir build.$*/app --pristine auto \
-	  --board $* -s app $(WEST_BOARD_ROOT)
+	else echo "No Zephyr"; fi
+endef
 
-build.%/blinky/zephyr/zephyr.hex:
-	if [ -d $(ZEPHYR_USRROOT) ]; then source $(ZEPHYR_USRROOT)/zephyr-env.sh ; \
-	elif [ -d $(ZEPHYR_SYSROOT) ]; then source $(ZEPHYR_SYSROOT)/zephyr-env.sh ; \
-	elif [ -d $(ZEPHYR_LOCALROOT) ]; then source $(ZEPHYR_LOCALROOT)/zephyr-env.sh ; \
-	else echo "No Zephyr"; fi && \
-	west build --build-dir build.$*/blinky --pristine auto \
-	  --board $* -s blinky $(WEST_BOARD_ROOT)
+# FORCE ensures Make always runs the recipe, letting ninja handle
+# incremental rebuild decisions.
+FORCE:
+
+build.%/app/zephyr/zephyr.hex: FORCE
+	@if [ -f build.$*/app/build.ninja ]; then \
+	  echo "ninja -C build.$*/app" ; \
+	  ninja -C build.$*/app ; \
+	else \
+	  $(source-zephyr) && \
+	  west build --build-dir build.$*/app --pristine auto \
+	    --board $* -s app $(WEST_BOARD_ROOT) ; \
+	fi
+
+build.%/blinky/zephyr/zephyr.hex: FORCE
+	@if [ -f build.$*/blinky/build.ninja ]; then \
+	  echo "ninja -C build.$*/blinky" ; \
+	  ninja -C build.$*/blinky ; \
+	else \
+	  $(source-zephyr) && \
+	  west build --build-dir build.$*/blinky --pristine auto \
+	    --board $* -s blinky $(WEST_BOARD_ROOT) ; \
+	fi
 
 .PHONY: versions
 versions:
@@ -64,8 +80,8 @@ versions:
 
 WEST_BOARD_ROOT := -- -DBOARD_ROOT=$(BOARD_ROOT)
 
-.PHONY: build
-build: $(APP_TARGETS)
+.PHONY: build app
+build app: $(APP_TARGETS)
 
 .PHONY: blinky
 blinky: $(BLINKY_TARGETS)
