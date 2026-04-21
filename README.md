@@ -8,9 +8,9 @@ Zephyr-based firmware for the Blue Clover Devices Bento board (plt demo board v3
 
 ## Status
 
-- [ ] Blinky application for RP2350B
-- [ ] Programming RP2350B
-- [ ] Update app/ folder to work with all devices present (this is currently a copy of the PLTv2 application)
+- [x] Blinky application for RP2350B
+- [x] Programming RP2350B
+- [ ] Test updated application with peripherals (pending fixes to pin assignment in hardware)
 
 ## Building the Project
 
