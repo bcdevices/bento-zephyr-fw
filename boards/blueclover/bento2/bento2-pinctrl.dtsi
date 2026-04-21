@@ -1,0 +1,99 @@
+/*
+ * Copyright (c) 2026 Blue Clover Devices
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2350b-pinctrl.h>
+
+/*
+ * Workaround: Zephyr's rp2350 pinctrl header defines UART0_TX_P18 and
+ * UART0_RX_P19 using RP2_PINCTRL_GPIO_FUNC_UART_ALT, which is never
+ * defined. The correct value is function 11 (UART_AUX).
+ */
+#ifndef RP2_PINCTRL_GPIO_FUNC_UART_ALT
+#define RP2_PINCTRL_GPIO_FUNC_UART_ALT RP2_PINCTRL_GPIO_FUNC_UART_AUX
+#endif
+
+&pinctrl {
+	/*
+	 * UART0 (console): TX=GP18 (SCI3_TXD / RP_TX0), RX=GP19 (SCI3_RXD /
+	 * RP_RX0). GP18/19 use the alternate UART function (function 11).
+	 */
+	uart0_default: uart0_default {
+		group1 {
+			pinmux = <UART0_TX_P18>;
+		};
+		group2 {
+			pinmux = <UART0_RX_P19>;
+			input-enable;
+		};
+	};
+
+	/*
+	 * UART1 (mikroBUS): TX=GP8 (SCI1_TXD), RX=GP9 (SCI1_RXD),
+	 * CTS=GP10 (SCI1_RTS routed to click CTS), RTS=GP11 (SCI1_CTS routed
+	 * to click RTS). Names follow the RP2350 function; the click module
+	 * sees the mirrored signal.
+	 */
+	uart1_default: uart1_default {
+		group1 {
+			pinmux = <UART1_TX_P8>, <UART1_RTS_P11>;
+		};
+		group2 {
+			pinmux = <UART1_RX_P9>, <UART1_CTS_P10>;
+			input-enable;
+		};
+	};
+
+	/*
+	 * I2C0 (SENS_I2C): SDA=GP20, SCL=GP21.
+	 * Shared bus across BME280-adjacent I2C, both Qwiic connectors, and
+	 * the mikroBUS I2C pins.
+	 */
+	i2c0_default: i2c0_default {
+		group1 {
+			pinmux = <I2C0_SDA_P20>, <I2C0_SCL_P21>;
+			input-enable;
+			input-schmitt-enable;
+		};
+	};
+
+	/*
+	 * SPI0 (SENS_SPI): SCK=GP6, TX(MOSI)=GP7, RX(MISO)=GP4.
+	 * Shared bus for the BME280 (CS=GP5) and the mikroBUS click SPI
+	 * (CS=GP13 / RP_CS_RTS1). Per-device CS is handled via GPIO.
+	 */
+	spi0_default: spi0_default {
+		group1 {
+			pinmux = <SPI0_SCK_P6>, <SPI0_TX_P7>;
+		};
+		group2 {
+			pinmux = <SPI0_RX_P4>;
+			input-enable;
+		};
+	};
+
+	/* Buzzer PWM: AUDIO_IN = GP29 (RP_PWM0 net), PWM channel 6B. */
+	pwm_ch6b_default: pwm_ch6b_default {
+		group1 {
+			pinmux = <PWM_6B_P29>;
+		};
+	};
+
+	/* mikroBUS PWM1: GP39 (RP_PWM1), PWM channel 11B. */
+	pwm_ch11b_default: pwm_ch11b_default {
+		group1 {
+			pinmux = <PWM_11B_P39>;
+		};
+	};
+
+	/*
+	 * PIO1 WS2812: RGB_D_IN driven from RP_S2 = GPIO36.
+	 * Signal path: GPIO36 -> SN74LVC1G125 level shifter -> LTST-E683CEGBW
+	 */
+	pio1_ws2812_default: pio1_ws2812_default {
+		group1 {
+			pinmux = <PIO1_P36>;
+		};
+	};
+};

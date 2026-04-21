@@ -1,0 +1,241 @@
+/*
+ * Copyright (c) 2026 Blue Clover Devices
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <raspberrypi/rpi_pico/rp2350b.dtsi>
+#include <raspberrypi/rpi_pico/m33.dtsi>
+
+#include <freq.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/led/led.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+#include "bento2-pinctrl.dtsi"
+
+/ {
+	model = "Blue Clover Bento2 Demo Board (SUB-00156)";
+	compatible = "blueclover,bento2";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,flash-controller = &qmi;
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		zephyr,code-partition = &code_partition;
+	};
+
+	aliases {
+		watchdog0 = &wdt0;
+		led-strip = &ws2812;
+		pwm-buzzer = &pwm;
+	};
+
+	/*
+	 * RGB_5V_IN power enable via signal relay (ULN2803 + K1).
+	 * Driven by RP_S1 = GPIO35 (pin 44). The Darlington inverts, so the
+	 * relay coil energizes when the GPIO is high; the enable-gpios flag
+	 * is ACTIVE_HIGH from the MCU's perspective for a powered rail.
+	 */
+	relay_5v: relay-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "relay_5v";
+		enable-gpios = <&gpio0_hi 3 GPIO_ACTIVE_LOW>;
+		regulator-boot-on;
+	};
+
+};
+
+/*
+ * mikroBUS click socket summary (discrete GPIOs only; SPI, I2C, UART
+ * and PWM are exposed through their bus controllers above):
+ *
+ *   Click pin   Signal         RP2350 GPIO
+ *   ---------   ------------   -----------
+ *   AN          AN1            GP40 (ADC0)
+ *   RST         click reset    GP46 (RP_S3) -- assumption, verify
+ *   CS          SPI chip sel   GP13 (RP_CS_RTS1)
+ *   INT         click IRQ      GP10 (SCI1_RTS / INT_CTS1)
+ *
+ * The RST line on the schematic is a shared "RST" net; on SUB-00156 it
+ * is driven from the ESP32-C3 block (ESP32-C3-RST). With the ESP32 off,
+ * RST must come from an RP GPIO -- RP_S3 = GP46 is the closest unused
+ * spare-signal pin. Cross-check against the PCB netlist before relying
+ * on this in firmware.
+ */
+
+&flash0 {
+	reg = <0x10000000 DT_SIZE_M(4)>;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Image definition block at start of flash */
+		image_def: partition@0 {
+			label = "image_def";
+			reg = <0x00000000 0x100>;
+			read-only;
+		};
+
+		/* Usable code partition */
+		code_partition: partition@100 {
+			label = "code-partition";
+			reg = <0x100 (DT_SIZE_M(4) - 0x100)>;
+			read-only;
+		};
+	};
+};
+
+/* UART0: console on GP18/GP19 (SCI3_TXD / SCI3_RXD). */
+&uart0 {
+	current-speed = <115200>;
+	status = "okay";
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+/* UART1: mikroBUS click UART on GP8/GP9 with CTS/RTS on GP10/GP11. */
+&uart1 {
+	current-speed = <115200>;
+	status = "okay";
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-names = "default";
+	hw-flow-control;
+};
+
+gpio0_lo: &gpio0 {
+	status = "okay";
+};
+
+&gpio0_hi {
+	status = "okay";
+};
+
+/*
+ * I2C0 (SENS_I2C): BME280-adjacent I2C, both Qwiic connectors and the
+ * mikroBUS click I2C pins share this bus. External 10k pull-ups on the
+ * Qwiic sheet hold SDA/SCL.
+ */
+&i2c0 {
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * SPI0 (SENS_SPI): SCK=GP6, MOSI=GP7, MISO=GP4.
+ * BME280 CS=GP5 (RP_SPIS_SS), mikroBUS click CS=GP13 (RP_CS_RTS1).
+ */
+&spi0 {
+	pinctrl-0 = <&spi0_default>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpio0_lo 5 GPIO_ACTIVE_LOW>,
+		   <&gpio0_lo 13 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	bme280: bme280@0 {
+		compatible = "bosch,bme280";
+		reg = <0>;
+		spi-max-frequency = <5000000>;
+	};
+};
+
+/*
+ * PWM peripheral. Channels used:
+ *   6B  (GP29) -> buzzer AUDIO_IN
+ *   11B (GP39) -> mikroBUS PWM1
+ */
+&pwm {
+	pinctrl-0 = <&pwm_ch6b_default>, <&pwm_ch11b_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * ADC: channels 0..3 are wired to GP40..GP43 (RP2350B ADC AIN0..3).
+ * ADC0 is shared with mikroBUS AN1; the others are available on test
+ * points / expansion use.
+ */
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@2 {
+		reg = <2>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@3 {
+		reg = <3>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+};
+
+&timer0 {
+	status = "okay";
+};
+
+&wdt0 {
+	status = "okay";
+};
+
+zephyr_udc0: &usbd {
+	status = "okay";
+};
+
+/*
+ * PIO1 drives the WS2812-compatible RGB LED (LTST-E683CEGBW) via a
+ * SN74LVC1G125 level shifter on GPIO36 (RP_S2 / RGB_D_IN).
+ */
+&pio1 {
+	status = "okay";
+
+	pio-ws2812 {
+		compatible = "worldsemi,ws2812-rpi_pico-pio";
+		status = "okay";
+		pinctrl-0 = <&pio1_ws2812_default>;
+		pinctrl-names = "default";
+		bit-waveform = <3>, <3>, <4>;
+
+		ws2812: ws2812 {
+			status = "okay";
+			gpios = <&gpio0_hi 4 GPIO_ACTIVE_HIGH>;
+			chain-length = <1>;
+			color-mapping = <LED_COLOR_ID_GREEN
+					 LED_COLOR_ID_RED
+					 LED_COLOR_ID_BLUE>;
+			reset-delay = <280>;
+			frequency = <800000>;
+		};
+	};
+};

@@ -1,0 +1,6 @@
+board:
+  name: bento2
+  full_name: Blue Clover Bento2 Demo Board (SUB-00156)
+  vendor: blueclover
+  socs:
+  - name: rp2350b

@@ -1,0 +1,5 @@
+# Copyright (c) 2026 Blue Clover Devices
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_BENTO2
+	select SOC_RP2350B_M33 if BOARD_BENTO2_RP2350B_M33
