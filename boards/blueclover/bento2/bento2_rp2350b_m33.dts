@@ -37,9 +37,9 @@
 
 	/*
 	 * RGB_5V_IN power enable via signal relay (ULN2803 + K1).
-	 * Driven by RP_S1 = GPIO35 (pin 44). The Darlington inverts, so the
-	 * relay coil energizes when the GPIO is high; the enable-gpios flag
-	 * is ACTIVE_HIGH from the MCU's perspective for a powered rail.
+	 * Driven by RP_S1 = GPIO35 (RELAY_S_IN, chip pin 44). The Darlington
+	 * inverts, so the relay coil energizes when the GPIO is low at the
+	 * MCU.
 	 */
 	relay_5v: relay-5v {
 		compatible = "regulator-fixed";
@@ -57,15 +57,19 @@
  *   Click pin   Signal         RP2350 GPIO
  *   ---------   ------------   -----------
  *   AN          AN1            GP40 (ADC0)
- *   RST         click reset    GP46 (RP_S3) -- assumption, verify
- *   CS          SPI chip sel   GP13 (RP_CS_RTS1)
- *   INT         click IRQ      GP10 (SCI1_RTS / INT_CTS1)
+ *   RST         click reset    GP34 (RP_S0)
+ *   CS          SPI chip sel   GP6  (RP_RTS1 net-aliased to CS_RTS1)
+ *   INT         click IRQ      GP7  (RP_CTS1 net-aliased to INT_CTS1)
+ *   PWM         PWM1           GP31 (RP_PWM1, PWM channel 7B)
+ *   RX/TX       UART1          GP4 (TX1) / GP5 (RX1)
+ *   SCK/MISO/MOSI  SPI1        GP10 / GP8 / GP11
+ *   SDA/SCL     I2C0           GP20 / GP21
  *
- * The RST line on the schematic is a shared "RST" net; on SUB-00156 it
- * is driven from the ESP32-C3 block (ESP32-C3-RST). With the ESP32 off,
- * RST must come from an RP GPIO -- RP_S3 = GP46 is the closest unused
- * spare-signal pin. Cross-check against the PCB netlist before relying
- * on this in firmware.
+ * Note: GP6/GP7 carry both the UART1 RTS/CTS signals and the click
+ * CS/INT lines via shared net naming on sheet 1. With UART1 hw flow
+ * control enabled, the application should NOT also drive these as
+ * GPIOs; either repurpose UART1 or accept that the click cannot use
+ * its CS/INT lines.
  */
 
 &flash0 {
@@ -92,7 +96,7 @@
 	};
 };
 
-/* UART0: console on GP18/GP19 (SCI3_TXD / SCI3_RXD). */
+/* UART0: console on GP12/GP13 (SCI3_TXD / SCI3_RXD). */
 &uart0 {
 	current-speed = <115200>;
 	status = "okay";
@@ -100,7 +104,11 @@
 	pinctrl-names = "default";
 };
 
-/* UART1: mikroBUS click UART on GP8/GP9 with CTS/RTS on GP10/GP11. */
+/*
+ * UART1: mikroBUS click UART on GP4/GP5 with hardware flow control on
+ * GP6 (CTS) / GP7 (RTS). See the mikroBUS comment block for the
+ * GP6/GP7 net-aliasing caveat.
+ */
 &uart1 {
 	current-speed = <115200>;
 	status = "okay";
@@ -130,14 +138,16 @@ gpio0_lo: &gpio0 {
 };
 
 /*
- * SPI0 (SENS_SPI): SCK=GP6, MOSI=GP7, MISO=GP4.
- * BME280 CS=GP5 (RP_SPIS_SS), mikroBUS click CS=GP13 (RP_CS_RTS1).
+ * SPI1 (SENS_SPI): SCK=GP10, MOSI=GP11, MISO=GP8.
+ * BME280 CS=GP9 (RP_SPIS_SS), mikroBUS click CS=GP6 (CS_RTS1 net,
+ * shared with UART1 RTS -- see mikroBUS comment block above).
+ * SUB-00156 wires the sensor SPI bus to the SPI1 hardware controller.
  */
-&spi0 {
-	pinctrl-0 = <&spi0_default>;
+&spi1 {
+	pinctrl-0 = <&spi1_default>;
 	pinctrl-names = "default";
-	cs-gpios = <&gpio0_lo 5 GPIO_ACTIVE_LOW>,
-		   <&gpio0_lo 13 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio0_lo 9 GPIO_ACTIVE_LOW>,
+		   <&gpio0_lo 6 GPIO_ACTIVE_LOW>;
 	status = "okay";
 
 	bme280: bme280@0 {
@@ -149,11 +159,15 @@ gpio0_lo: &gpio0 {
 
 /*
  * PWM peripheral. Channels used:
- *   6B  (GP29) -> buzzer AUDIO_IN
- *   11B (GP39) -> mikroBUS PWM1
+ *   7A (GP30) -> buzzer AUDIO_IN
+ *   7B (GP31) -> mikroBUS PWM1
+ *
+ * RP_PWM2 (GP32, channel 8A) is NC on SUB-00156 REV00. Add the
+ * pwm_ch8a_default group from bento2-pinctrl.dtsi here when the net is
+ * connected on a future revision.
  */
 &pwm {
-	pinctrl-0 = <&pwm_ch6b_default>, <&pwm_ch11b_default>;
+	pinctrl-0 = <&pwm_ch7a_default>, <&pwm_ch7b_default>;
 	pinctrl-names = "default";
 	status = "okay";
 };
@@ -214,8 +228,14 @@ zephyr_udc0: &usbd {
 };
 
 /*
+ * SCI2 (RP_TX2/RX2/CTS2/RTS2 on GP16/17/18/19) is NC on SUB-00156
+ * REV00. RP2350 only has two hardware UART controllers; a future SCI2
+ * connection would need a PIO-based UART instead of a third &uart node.
+ */
+
+/*
  * PIO1 drives the WS2812-compatible RGB LED (LTST-E683CEGBW) via a
- * SN74LVC1G125 level shifter on GPIO36 (RP_S2 / RGB_D_IN).
+ * SN74LVC1G125 level shifter on GPIO14 (RP_S2 / RGB_D_IN).
  */
 &pio1 {
 	status = "okay";
@@ -229,7 +249,7 @@ zephyr_udc0: &usbd {
 
 		ws2812: ws2812 {
 			status = "okay";
-			gpios = <&gpio0_hi 4 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
 			chain-length = <1>;
 			color-mapping = <LED_COLOR_ID_GREEN
 					 LED_COLOR_ID_RED
