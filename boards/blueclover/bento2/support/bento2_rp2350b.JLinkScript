@@ -1,0 +1,13 @@
+/*
+ * JLink script for RP2350B on Bento2.
+ *
+ * AfterFlashProg toggles the reset pin after programming so the RP2350 bootrom
+ * runs freely without the debugger halting it before handoff to the application.
+ */
+int AfterFlashProg(void) {
+  JTAG_ResetPin = 0;
+  JLINK_SYS_Sleep(50);
+  JTAG_ResetPin = 1;
+  JLINK_SYS_Sleep(200);
+  return 0;
+}

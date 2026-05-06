@@ -7,6 +7,7 @@ board_runner_args(openocd --cmd-pre-init "set_adapter_speed_if_not_set 5000")
 board_runner_args(probe-rs "--chip=RP235x")
 board_runner_args(uf2 "--board-id=RP2350")
 board_runner_args(jlink "--device=RP2350_M33_0")
+board_runner_args(jlink "--jlink-script=${CMAKE_CURRENT_LIST_DIR}/support/bento2_rp2350b.JLinkScript")
 
 include(${ZEPHYR_BASE}/boards/common/openocd.board.cmake)
 include(${ZEPHYR_BASE}/boards/common/probe-rs.board.cmake)

@@ -80,6 +80,27 @@ versions:
 
 WEST_BOARD_ROOT := -- -DBOARD_ROOT=$(BOARD_ROOT)
 
+JLINK := JLinkExe
+JLINK_DEVICE := RP2350_M33_0
+JLINK_SPEED := 5000
+JLINK_SCRIPT := $(BASE_PATH)/boards/blueclover/bento2/support/bento2_rp2350b_run.JLinkScript
+
+# Flash and auto-run via two-step: loadfile (normal halt), then pin-reset via JLinkScript
+define jlink-flash-and-run
+	printf 'connect\nloadfile $(1)\nq\n' > /tmp/jlink_flash.jlink
+	$(JLINK) -device $(JLINK_DEVICE) -if SWD -speed $(JLINK_SPEED) -autoconnect 1 -CommanderScript /tmp/jlink_flash.jlink
+	printf 'connect\nr\nq\n' > /tmp/jlink_run.jlink
+	$(JLINK) -device $(JLINK_DEVICE) -if SWD -speed $(JLINK_SPEED) -autoconnect 1 -JLinkScriptFile $(JLINK_SCRIPT) -CommanderScript /tmp/jlink_run.jlink
+endef
+
+.PHONY: flash
+flash: $(APP_TARGETS)
+	$(call jlink-flash-and-run,$(BASE_PATH)/build.bento/rp2350b/m33/app/zephyr/zephyr.hex)
+
+.PHONY: flash-blinky
+flash-blinky: $(BLINKY_TARGETS)
+	$(call jlink-flash-and-run,$(BASE_PATH)/build.bento/rp2350b/m33/blinky/zephyr/zephyr.hex)
+
 .PHONY: build app
 build app: $(APP_TARGETS)
 
