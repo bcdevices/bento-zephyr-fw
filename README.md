@@ -59,6 +59,20 @@ make docker
 
 to end up with build artifacts in `dist/`
 
+### Flashing
+
+You'll need to source the zephyr env first:
+
+```sh
+source zephyrproject/zephyr/zephyr-env.sh
+```
+
+Flashing with J-Link:
+
+```sh
+west flash --build-dir sub3-zephyr-fw/build.bento/rp2350b/m33/blinky --runner jlink --reset
+```
+
 ## Links
 
 - PLT Demo Board Product page:
