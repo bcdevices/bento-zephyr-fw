@@ -1,0 +1,115 @@
+diff --git i/drivers/led_strip/ws2812_rpi_pico_pio.c w/drivers/led_strip/ws2812_rpi_pico_pio.c
+index 7da2763da62..cea172d8519 100644
+--- i/drivers/led_strip/ws2812_rpi_pico_pio.c
++++ w/drivers/led_strip/ws2812_rpi_pico_pio.c
+@@ -23,6 +23,7 @@ struct ws2812_led_strip_data {
+ struct ws2812_led_strip_config {
+ 	const struct device *piodev;
+ 	const uint8_t gpio_pin;
++	const uint8_t gpio_port_offset;
+ 	uint8_t num_colors;
+ 	size_t length;
+ 	uint32_t frequency;
+@@ -35,6 +36,10 @@ struct ws2812_rpi_pico_pio_config {
+ 	const struct device *piodev;
+ 	const struct pinctrl_dev_config *const pcfg;
+ 	struct pio_program program;
++#if defined(CONFIG_SOC_SERIES_RP2350)
++	/* PIO GPIOBASE window origin (0 or 16) covering the strip data pin. */
++	const uint8_t gpio_base;
++#endif
+ };
+ 
+ static int ws2812_led_strip_sm_init(const struct device *dev)
+@@ -48,17 +53,32 @@ static int ws2812_led_strip_sm_init(const struct device *dev)
+ 
+ 	pio = pio_rpi_pico_get_pio(config->piodev);
+ 
++	/*
++	 * Absolute GPIO number. DT_GPIO_PIN_BY_IDX returns the controller-
++	 * relative pin (e.g. 4 for gpio0_hi pin 4); add the port offset
++	 * (port_reg * 32) to reach e.g. GPIO36 (Bento1) or GPIO43 (PER-401).
++	 */
++	uint gpio_pin = config->gpio_pin + config->gpio_port_offset;
++
++#if defined(CONFIG_SOC_SERIES_RP2350)
++	/*
++	 * GPIOBASE has already been moved (see ws2812_rpi_pico_pio_init) so the
++	 * 32-pin PIO window covers the data pin; initialise it for PIO use.
++	 */
++	pio_gpio_init(pio, gpio_pin);
++#endif
++
+ 	sm = pio_claim_unused_sm(pio, false);
+ 	if (sm < 0) {
+ 		return -EINVAL;
+ 	}
+ 
+ 	sm_config_set_sideset(&sm_config, 1, false, false);
+-	sm_config_set_sideset_pins(&sm_config, config->gpio_pin);
++	sm_config_set_sideset_pins(&sm_config, gpio_pin);
+ 	sm_config_set_out_shift(&sm_config, false, true, (config->num_colors == 4 ? 32 : 24));
+ 	sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+ 	sm_config_set_clkdiv(&sm_config, clkdiv);
+-	pio_sm_set_consecutive_pindirs(pio, sm, config->gpio_pin, 1, true);
++	pio_sm_set_consecutive_pindirs(pio, sm, gpio_pin, 1, true);
+ 	pio_sm_init(pio, sm, -1, &sm_config);
+ 	pio_sm_set_enabled(pio, sm, true);
+ 
+@@ -173,6 +193,18 @@ static int ws2812_rpi_pico_pio_init(const struct device *dev)
+ 
+ 	pio = pio_rpi_pico_get_pio(config->piodev);
+ 
++#if defined(CONFIG_SOC_SERIES_RP2350)
++	/*
++	 * The RP2350 PIO can only address a 32-pin window selected by GPIOBASE
++	 * (0 -> GPIO 0-31, 16 -> GPIO 16-47). It must be set before loading the
++	 * PIO program (the SDK rejects pio_set_gpio_base() once instruction
++	 * memory is non-empty). config->gpio_base is computed at build time from
++	 * the data pin: 16 reaches high-bank pins like GPIO36 (Bento1) / GPIO43
++	 * (PER-401); 0 keeps low-bank pins like GPIO14 (Bento2) addressable.
++	 */
++	pio_set_gpio_base(pio, config->gpio_base);
++#endif
++
+ 	pio_add_program(pio, &config->program);
+ 
+ 	return pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
+@@ -182,6 +214,20 @@ static int ws2812_rpi_pico_pio_init(const struct device *dev)
+ 	(DT_PROP_BY_IDX(node, bit_waveform, 0) + DT_PROP_BY_IDX(node, bit_waveform, 1) +           \
+ 	 DT_PROP_BY_IDX(node, bit_waveform, 2))
+ 
++/* Port offset added to the controller-relative pin to get the absolute GPIO. */
++#define WS2812_PORT_OFFSET(node) (DT_REG_ADDR(DT_GPIO_CTLR_BY_IDX(node, gpios, 0)) * 32)
++
++/* Absolute GPIO number of the strip data pin. */
++#define WS2812_ABS_GPIO_PIN(node) (WS2812_PORT_OFFSET(node) + DT_GPIO_PIN_BY_IDX(node, gpios, 0))
++
++/*
++ * RP2350 PIO GPIOBASE window origin for the strip data pin: 16 if the pin is
++ * in the high bank (>= 32, e.g. GPIO36/GPIO43), else 0. The child strip node
++ * is named "ws2812" on these boards.
++ */
++#define WS2812_PIO_GPIO_BASE(inst)                                                                  \
++	(WS2812_ABS_GPIO_PIN(DT_INST_CHILD(inst, ws2812)) >= 32 ? 16 : 0)
++
+ #define WS2812_CHILD_INIT(node)                                                                    \
+ 	static const uint8_t ws2812_led_strip_##node##_color_mapping[] =                           \
+ 		DT_PROP(node, color_mapping);                                                      \
+@@ -190,6 +236,7 @@ static int ws2812_rpi_pico_pio_init(const struct device *dev)
+ 	static const struct ws2812_led_strip_config ws2812_led_strip_##node##_config = {           \
+ 		.piodev = DEVICE_DT_GET(DT_PARENT(DT_PARENT(node))),                               \
+ 		.gpio_pin = DT_GPIO_PIN_BY_IDX(node, gpios, 0),                                    \
++		.gpio_port_offset = WS2812_PORT_OFFSET(node),                                      \
+ 		.num_colors = DT_PROP_LEN(node, color_mapping),                                    \
+ 		.length = DT_PROP(node, chain_length),                                             \
+ 		.color_mapping = ws2812_led_strip_##node##_color_mapping,                          \
+@@ -243,6 +290,8 @@ static int ws2812_rpi_pico_pio_init(const struct device *dev)
+ 				.length = ARRAY_SIZE(rpi_pico_pio_ws2812_instructions_##inst),     \
+ 				.origin = -1,                                                      \
+ 			},                                                                         \
++		IF_ENABLED(CONFIG_SOC_SERIES_RP2350,                                               \
++			   (.gpio_base = WS2812_PIO_GPIO_BASE(inst),))                             \
+ 	};                                                                                         \
+                                                                                                    \
+ 	DEVICE_DT_INST_DEFINE(inst, &ws2812_rpi_pico_pio_init, NULL, NULL,                         \

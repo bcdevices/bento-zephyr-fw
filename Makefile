@@ -49,11 +49,17 @@ define source-zephyr
 	else echo "No Zephyr"; fi
 endef
 
+# Apply out-of-tree Zephyr patches (idempotent; safe to run every build).
+# Resolves the Zephyr root the same way the build does (user > sys > local).
+.PHONY: apply-patches
+apply-patches:
+	@$(source-zephyr) && $(BASE_PATH)/patches/apply-patches.sh "$$ZEPHYR_BASE"
+
 # FORCE ensures Make always runs the recipe, letting ninja handle
 # incremental rebuild decisions.
 FORCE:
 
-build.%/app/zephyr/zephyr.hex: FORCE
+build.%/app/zephyr/zephyr.hex: FORCE apply-patches
 	@if [ -f build.$*/app/build.ninja ]; then \
 	  echo "ninja -C build.$*/app" ; \
 	  ninja -C build.$*/app ; \
@@ -63,7 +69,7 @@ build.%/app/zephyr/zephyr.hex: FORCE
 	    --board $* -s app $(WEST_BOARD_ROOT) ; \
 	fi
 
-build.%/blinky/zephyr/zephyr.hex: FORCE
+build.%/blinky/zephyr/zephyr.hex: FORCE apply-patches
 	@if [ -f build.$*/blinky/build.ninja ]; then \
 	  echo "ninja -C build.$*/blinky" ; \
 	  ninja -C build.$*/blinky ; \
