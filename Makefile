@@ -35,8 +35,15 @@ ZEPHYR_LOCALROOT := $(BASE_PATH)/zephyrproject/zephyr
 
 BOARD_ROOT := $(BASE_PATH)
 
+# Target board. Override on the command line to build a different board,
+# e.g. `make build BOARD=bento` for the original Bento1.
+BOARD ?= bento2
+
 BOARDS_APP :=
-BOARDS_APP += bento/rp2350b/m33
+BOARDS_APP += $(BOARD)/rp2350b/m33
+
+# Build directory for the selected board (matches west --build-dir below).
+BUILD_DIR := build.$(strip $(BOARDS_APP))
 
 APP_TARGETS := $(patsubst %,build.%/app/zephyr/zephyr.hex,$(BOARDS_APP))
 BLINKY_TARGETS := $(patsubst %,build.%/blinky/zephyr/zephyr.hex,$(BOARDS_APP))
@@ -89,7 +96,7 @@ WEST_BOARD_ROOT := -- -DBOARD_ROOT=$(BOARD_ROOT)
 JLINK := JLinkExe
 JLINK_DEVICE := RP2350_M33_0
 JLINK_SPEED := 5000
-JLINK_SCRIPT := $(BASE_PATH)/boards/blueclover/bento2/support/bento2_rp2350b_run.JLinkScript
+JLINK_SCRIPT := $(BASE_PATH)/boards/blueclover/$(BOARD)/support/$(BOARD)_rp2350b_run.JLinkScript
 
 # Flash and auto-run via two-step: loadfile (normal halt), then pin-reset via JLinkScript
 define jlink-flash-and-run
@@ -101,11 +108,11 @@ endef
 
 .PHONY: flash
 flash: $(APP_TARGETS)
-	$(call jlink-flash-and-run,$(BASE_PATH)/build.bento/rp2350b/m33/app/zephyr/zephyr.hex)
+	$(call jlink-flash-and-run,$(BASE_PATH)/$(BUILD_DIR)/app/zephyr/zephyr.hex)
 
 .PHONY: flash-blinky
 flash-blinky: $(BLINKY_TARGETS)
-	$(call jlink-flash-and-run,$(BASE_PATH)/build.bento/rp2350b/m33/blinky/zephyr/zephyr.hex)
+	$(call jlink-flash-and-run,$(BASE_PATH)/$(BUILD_DIR)/blinky/zephyr/zephyr.hex)
 
 .PHONY: build app
 build app: $(APP_TARGETS)
@@ -135,10 +142,10 @@ dist-clean:
 
 .PHONY: dist
 dist: dist-clean dist-prep build
-	install -m 666 build.blueclover_plt_demo_v2_nrf52832/app/zephyr/zephyr.hex dist/app-pltdemov2-$(VERSION_TAG).hex
-	install -m 666 build.blueclover_plt_demo_v2_nrf52832/app/zephyr/zephyr.elf dist/app-pltdemov2-$(VERSION_TAG).elf
-	install -m 666 build.blueclover_plt_demo_v2_nrf52832/app/zephyr/zephyr.map dist/app-pltdemov2-$(VERSION_TAG).map
-	sed 's/{{BOARD}}/pltdemov2/g; s/{{VERSION}}/$(VERSION_TAG)/g' test-suites/suite-demo-board-zephyr.yaml.template > dist/suite-pltdemov2-board-zephyr-$(VERSION_TAG).yaml
+	install -m 666 $(BUILD_DIR)/app/zephyr/zephyr.hex dist/app-$(BOARD)-$(VERSION_TAG).hex
+	install -m 666 $(BUILD_DIR)/app/zephyr/zephyr.elf dist/app-$(BOARD)-$(VERSION_TAG).elf
+	install -m 666 $(BUILD_DIR)/app/zephyr/zephyr.map dist/app-$(BOARD)-$(VERSION_TAG).map
+	sed 's/{{BOARD}}/$(BOARD)/g; s/{{VERSION}}/$(VERSION_TAG)/g' test-suites/suite-demo-board-zephyr.yaml.template > dist/suite-$(BOARD)-board-zephyr-$(VERSION_TAG).yaml
 
 .PHONY: deploy
 deploy:
