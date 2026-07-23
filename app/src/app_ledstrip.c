@@ -51,11 +51,27 @@ int app_ledstrip_run(void)
 {
 	const struct led_rgb *c = &colors[ledstrip_counter % ARRAY_SIZE(colors)];
 
-	for (size_t i = 0; i < NUM_LEDS; i++) {
-		pixels[i] = *c;
-	}
-
 	ledstrip_counter++;
 
+	return app_ledstrip_set_rgb(c->r, c->g, c->b);
+}
+
+int app_ledstrip_set_rgb(uint8_t r, uint8_t g, uint8_t b)
+{
+	if (!device_is_ready(strip)) {
+		return -ENODEV;
+	}
+
+	for (size_t i = 0; i < NUM_LEDS; i++) {
+		pixels[i].r = r;
+		pixels[i].g = g;
+		pixels[i].b = b;
+	}
+
 	return led_strip_update_rgb(strip, pixels, NUM_LEDS);
+}
+
+int app_ledstrip_off(void)
+{
+	return app_ledstrip_set_rgb(0, 0, 0);
 }

@@ -9,4 +9,5 @@ target_sources(app PRIVATE
   src/app_buzzer.c
   src/app_sensor.c
   src/app_ledstrip.c
+  src/app_shell.c
 )

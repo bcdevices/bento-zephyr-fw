@@ -24,8 +24,8 @@
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,flash-controller = &qmi;
-		zephyr,console = &uart0;
-		zephyr,shell-uart = &uart0;
+		zephyr,console = &uart1;
+		zephyr,shell-uart = &uart1;
 		zephyr,code-partition = &code_partition;
 	};
 
@@ -96,7 +96,7 @@
 	};
 };
 
-/* UART0: console on GP12/GP13 (SCI3_TXD / SCI3_RXD). */
+/* UART0: general-purpose UART on GP12/GP13 (SCI3_TXD / SCI3_RXD). */
 &uart0 {
 	current-speed = <115200>;
 	status = "okay";
@@ -105,16 +105,20 @@
 };
 
 /*
- * UART1: mikroBUS click UART on GP4/GP5 with hardware flow control on
- * GP6 (CTS) / GP7 (RTS). See the mikroBUS comment block for the
- * GP6/GP7 net-aliasing caveat.
+ * UART1: console and shell on GP4/GP5 (SCI1_TXD / SCI1_RXD, nets RP_TX1 /
+ * RP_RX1). These pins are also the mikroBUS click UART.
+ *
+ * Hardware flow control is intentionally NOT enabled. The CTS/RTS pins
+ * (GP6/GP7) are net-aliased on the mikroBUS socket as click CS / INT, and
+ * requiring CTS would stall all shell output when connected to the usual
+ * 3-wire (TX/RX/GND) serial adapter. See the mikroBUS comment block for
+ * the GP6/GP7 net-aliasing caveat.
  */
 &uart1 {
 	current-speed = <115200>;
 	status = "okay";
 	pinctrl-0 = <&uart1_default>;
 	pinctrl-names = "default";
-	hw-flow-control;
 };
 
 gpio0_lo: &gpio0 {
@@ -139,14 +143,14 @@ gpio0_lo: &gpio0 {
 
 /*
  * SPI1 (SENS_SPI): SCK=GP10, MOSI=GP11, MISO=GP8.
- * BME280 CS=GP9 (RP_SPIS_SS), mikroBUS click CS=GP6 (CS_RTS1 net,
- * shared with UART1 RTS -- see mikroBUS comment block above).
+ * BME280 CS=GP1, mikroBUS click CS=GP6 (CS_RTS1 net, shared with UART1
+ * RTS -- see mikroBUS comment block above).
  * SUB-00156 wires the sensor SPI bus to the SPI1 hardware controller.
  */
 &spi1 {
 	pinctrl-0 = <&spi1_default>;
 	pinctrl-names = "default";
-	cs-gpios = <&gpio0_lo 9 GPIO_ACTIVE_LOW>,
+	cs-gpios = <&gpio0_lo 1 GPIO_ACTIVE_LOW>,
 		   <&gpio0_lo 6 GPIO_ACTIVE_LOW>;
 	status = "okay";
 

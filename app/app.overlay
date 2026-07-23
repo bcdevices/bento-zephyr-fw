@@ -1,0 +1,21 @@
+/*
+ * Copyright (c) 2026 Blue Clover Devices
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Define a USB CDC-ACM serial port so the board can also be exercised over
+ * USB. The interactive shell and console both live on the physical UART
+ * (zephyr,console / zephyr,shell-uart = &uart1, GP4/GP5 = RP_TX1/RP_RX1,
+ * in the board DTS); this node is left available for application use.
+ *
+ * To route the shell back over USB instead, restore:
+ *     / { chosen { zephyr,shell-uart = &cdc_acm_uart0; }; };
+ */
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+		tx-fifo-size = <8192>;
+		rx-fifo-size = <1024>;
+	};
+};

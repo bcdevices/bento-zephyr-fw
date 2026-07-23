@@ -21,28 +21,32 @@
 	};
 
 	/*
-	 * UART1 (mikroBUS): TX=GP4 (SCI1_TXD / RP_TX1), RX=GP5 (SCI1_RXD /
-	 * RP_RX1), CTS=GP6 (SCI1_RTS / RP_RTS1), RTS=GP7 (SCI1_CTS / RP_CTS1).
+	 * UART1 (console + shell, also the mikroBUS click UART):
+	 * TX=GP4 (SCI1_TXD / RP_TX1), RX=GP5 (SCI1_RXD / RP_RX1).
+	 *
+	 * Flow control is deliberately left out. The CTS/RTS pins would be
+	 * GP6 (SCI1_RTS / RP_RTS1) and GP7 (SCI1_CTS / RP_CTS1), but those
+	 * two pins are "double-duty" net-aliased on the mikroBUS click
+	 * socket as click CS / INT (sheet 1):
+	 *     RP_RTS1 (GP6) <-> CS_RTS1   -> click CS
+	 *     RP_CTS1 (GP7) <-> INT_CTS1  -> click INT
+	 * Leaving them unmuxed here keeps them available as GPIO for click
+	 * CS/INT, and avoids stalling console/shell output on a CTS line
+	 * that a 3-wire serial adapter never drives.
 	 *
 	 * Note on naming: the schematic labels GP6/GP7 with the "mirrored"
 	 * SCI/RTS-CTS naming so the click-side labels match. The native
 	 * RP2350 function on GP6 is UART1_CTS (input) and on GP7 is
-	 * UART1_RTS (output); when this UART asserts hardware flow control
-	 * it correctly cross-couples to the click's RTS/CTS lines.
-	 *
-	 * The same two pins are also "double-duty" net-aliased on the
-	 * mikroBUS click socket as click CS / INT (sheet 1):
-	 *     RP_RTS1 (GP6) <-> CS_RTS1   -> click CS
-	 *     RP_CTS1 (GP7) <-> INT_CTS1  -> click INT
-	 * If a click module needs CS/INT instead of UART flow control, the
-	 * pins must be repurposed at the application level (drive as GPIO).
+	 * UART1_RTS (output). To restore hardware flow control, add
+	 * <UART1_RTS_P7> to group1, <UART1_CTS_P6> to group2, and
+	 * hw-flow-control to the &uart1 node in the board DTS.
 	 */
 	uart1_default: uart1_default {
 		group1 {
-			pinmux = <UART1_TX_P4>, <UART1_RTS_P7>;
+			pinmux = <UART1_TX_P4>;
 		};
 		group2 {
-			pinmux = <UART1_RX_P5>, <UART1_CTS_P6>;
+			pinmux = <UART1_RX_P5>;
 			input-enable;
 		};
 	};
