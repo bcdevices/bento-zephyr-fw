@@ -1,0 +1,215 @@
+diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
+index b0fb2fcf44f..445fad16582 100644
+--- i/drivers/usb/udc/udc_rpi_pico.c
++++ w/drivers/usb/udc/udc_rpi_pico.c
+@@ -23,6 +23,64 @@
+ #include <zephyr/logging/log.h>
+ LOG_MODULE_REGISTER(udc_rpi_pico, CONFIG_UDC_DRIVER_LOG_LEVEL);
+ 
++/*
++ * The USB dual-port RAM (DPRAM) only tolerates naturally-aligned accesses.
++ * Some libc memcpy() implementations issue unaligned word accesses, which on
++ * the RP2350 Cortex-M33 core raise a UsageFault when the target is DPRAM (the
++ * Hazard3 core happens to tolerate them, which is why this only bites on the
++ * M33 build). Copy through 32-bit accesses on the DPRAM side, byte-assembling
++ * the RAM side which may itself be unaligned.
++ *
++ * See zephyr issue #96993 (CDC-ACM UsageFault in rpi_pico_prep_tx on RP2350).
++ */
++static void rpi_pico_dpram_write(void *dpram_dst, const void *src, size_t len)
++{
++	volatile uint32_t *d = dpram_dst;
++	const uint8_t *s = src;
++
++	while (len >= sizeof(uint32_t)) {
++		uint32_t w = (uint32_t)s[0] | ((uint32_t)s[1] << 8) |
++			     ((uint32_t)s[2] << 16) | ((uint32_t)s[3] << 24);
++		*d++ = w;
++		s += sizeof(uint32_t);
++		len -= sizeof(uint32_t);
++	}
++
++	if (len) {
++		uint32_t w = 0;
++
++		for (size_t i = 0; i < len; i++) {
++			w |= (uint32_t)s[i] << (8U * i);
++		}
++		*d = w;
++	}
++}
++
++static void rpi_pico_dpram_read(void *dst, const void *dpram_src, size_t len)
++{
++	const volatile uint32_t *s = dpram_src;
++	uint8_t *d = dst;
++
++	while (len >= sizeof(uint32_t)) {
++		uint32_t w = *s++;
++
++		d[0] = (uint8_t)w;
++		d[1] = (uint8_t)(w >> 8);
++		d[2] = (uint8_t)(w >> 16);
++		d[3] = (uint8_t)(w >> 24);
++		d += sizeof(uint32_t);
++		len -= sizeof(uint32_t);
++	}
++
++	if (len) {
++		uint32_t w = *s;
++
++		for (size_t i = 0; i < len; i++) {
++			d[i] = (uint8_t)(w >> (8U * i));
++		}
++	}
++}
++
+ struct rpi_pico_config {
+ 	usb_hw_t *base;
+ 	usb_device_dpram_t *dpram;
+@@ -290,7 +348,7 @@ static int rpi_pico_prep_tx(const struct device *dev,
+ 	lock_key = irq_lock();
+ 
+ 	len = MIN(cfg->mps, buf->len);
+-	memcpy(ep_data->buf, buf->data, len);
++	rpi_pico_dpram_write(ep_data->buf, buf->data, len);
+ 
+ 	LOG_DBG("Prepare TX ep 0x%02x len %u pid: %u",
+ 		cfg->addr, len, ep_data->next_pid);
+@@ -627,7 +685,9 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
+ 	}
+ 
+ 	len = read_buf_ctrl_reg(dev, ep) & USB_BUF_CTRL_LEN_MASK;
+-	net_buf_add_mem(buf, ep_data->buf, MIN(len, net_buf_tailroom(buf)));
++	len = MIN(len, net_buf_tailroom(buf));
++	/* Read from DPRAM with aligned 32-bit accesses (see rpi_pico_dpram_read). */
++	rpi_pico_dpram_read(net_buf_add(buf, len), ep_data->buf, len);
+ 
+ 	if (net_buf_tailroom(buf) && len == udc_mps_ep_size(ep_cfg)) {
+ 		__unused int err;
+@@ -676,6 +736,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 	usb_hw_t *base = config->base;
+ 	uint32_t status = base->ints;
+ 	uint32_t handled = 0;
++	bool error_seen = false;
+ 
+ 	if (status & USB_INTS_DEV_SOF_BITS) {
+ 		handled |= USB_INTS_DEV_SOF_BITS;
+@@ -753,47 +814,57 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		udc_submit_event(dev, UDC_EVT_RESET, 0);
+ 	}
+ 
++	/*
++	 * Line-level bus errors (CRC, bit-stuff, data-sequence, RX timeout).
++	 *
++	 * On the RP2350 these fire in a continuous storm when the device sits
++	 * behind a USB hub (including the internal hub on many host ports): the
++	 * SIE misreports the hub's split-transaction PRE/preamble tokens as CRC /
++	 * bit-stuff / data-sequence / RX-timeout errors, and its single shared
++	 * handshake-status latch can also surface a genuine completion as one of
++	 * these. The device otherwise communicates normally.
++	 *
++	 * The stock driver submits a UDC_EVT_ERROR for each one, which floods the
++	 * usbd core thread under sustained traffic and starves the data path.
++	 * Here we treat these four as benign: clear the SIE status latch and note
++	 * that an error occurred so the buffer-status register is re-checked
++	 * below (a completion may be latched there with its BUFF_STATUS interrupt
++	 * lost to the shared-latch quirk). No error event is raised.
++	 *
++	 * RX_OVERFLOW is a genuine buffer overrun, distinct from these line
++	 * errors, and is still surfaced as an error event.
++	 */
+ 	if (status & USB_INTS_ERROR_DATA_SEQ_BITS) {
+ 		handled |= USB_INTS_ERROR_DATA_SEQ_BITS;
+ 		sie_status_clr(dev, USB_SIE_STATUS_DATA_SEQ_ERROR_BITS);
+-		/*
+-		 * This can be triggered before the STALL handshake response
+-		 * to the OUT DATAx. Handling IRQ_ON_STALL to fix the expected
+-		 * DATA PID is too much overhead since the endpoint is halted
+-		 * anyway.
+-		 */
+-		LOG_WRN("Data Sequence Error");
++		error_seen = true;
+ 	}
+ 
+ 	if (status & USB_INTS_ERROR_RX_TIMEOUT_BITS) {
+ 		handled |= USB_INTS_ERROR_RX_TIMEOUT_BITS;
+ 		sie_status_clr(dev, USB_SIE_STATUS_RX_TIMEOUT_BITS);
++		error_seen = true;
++	}
+ 
+-		LOG_ERR("RX timeout");
+-		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
++	if (status & USB_INTS_ERROR_BIT_STUFF_BITS) {
++		handled |= USB_INTS_ERROR_BIT_STUFF_BITS;
++		sie_status_clr(dev, USB_SIE_STATUS_BIT_STUFF_ERROR_BITS);
++		error_seen = true;
++	}
++
++	if (status & USB_INTS_ERROR_CRC_BITS) {
++		handled |= USB_INTS_ERROR_CRC_BITS;
++		sie_status_clr(dev, USB_SIE_STATUS_CRC_ERROR_BITS);
++		error_seen = true;
+ 	}
+ 
+ 	if (status & USB_INTS_ERROR_RX_OVERFLOW_BITS) {
+ 		sie_status_clr(dev, USB_SIE_STATUS_RX_OVERFLOW_BITS);
+ 		handled |= USB_INTS_ERROR_RX_OVERFLOW_BITS;
+ 
++		/* A real buffer overrun, not a benign hub artifact. */
+ 		LOG_ERR("RX overflow");
+-		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
+-	}
+-
+-	if (status & USB_INTS_ERROR_BIT_STUFF_BITS) {
+-		handled |= USB_INTS_ERROR_BIT_STUFF_BITS;
+-		sie_status_clr(dev, USB_SIE_STATUS_BIT_STUFF_ERROR_BITS);
+-
+-		LOG_ERR("Bit Stuff Error");
+-		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
+-	}
+-
+-	if (status & USB_INTS_ERROR_CRC_BITS) {
+-		handled |= USB_INTS_ERROR_CRC_BITS;
+-		sie_status_clr(dev, USB_SIE_STATUS_CRC_ERROR_BITS);
+-
+-		LOG_ERR("CRC Error");
++		error_seen = true;
+ 		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
+ 	}
+ 
+@@ -802,9 +873,16 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 	 * the same time, e.g. because of the interrupt latency. Check
+ 	 * BUF_STATUS interrupt first to get the notifications in the right
+ 	 * order.
++	 *
++	 * error_seen forces the drain even when the BUFF_STATUS interrupt bit
++	 * is not set: a genuine buffer completion can be latched in the
++	 * buf_status register while its BUFF_STATUS interrupt was surfaced as a
++	 * spurious bus error above. rpi_pico_handle_buff_status() re-reads
++	 * buf_status and is a no-op when nothing completed, so the extra drain
++	 * is always safe.
+ 	 */
+-	if (status & USB_INTS_BUFF_STATUS_BITS) {
+-		handled |= USB_INTS_BUFF_STATUS_BITS;
++	if ((status & USB_INTS_BUFF_STATUS_BITS) || error_seen) {
++		handled |= (status & USB_INTS_BUFF_STATUS_BITS);
+ 		rpi_pico_handle_buff_status(dev);
+ 	}
+ 
+@@ -1063,7 +1141,14 @@ static int udc_rpi_pico_enable(const struct device *dev)
+ 	/* Enable an interrupt per EP0 transaction */
+ 	sys_write32(USB_SIE_CTRL_EP0_INT_1BUF_BITS, (mm_reg_t)&base->sie_ctrl);
+ 
+-	/* Enable interrupts */
++	/*
++	 * Enable interrupts.
++	 *
++	 * All error interrupts are enabled; the ISR treats the benign hub-related
++	 * line errors (CRC / bit-stuff / data-sequence / RX timeout) as
++	 * non-fatal rather than raising a per-event error -- see the error
++	 * handling in rpi_pico_isr_handler().
++	 */
+ 	sys_write32(IF_ENABLED(CONFIG_UDC_ENABLE_SOF, (USB_INTE_DEV_SOF_BITS |))
+ 		    USB_INTE_SETUP_REQ_BITS |
+ 		    USB_INTE_DEV_RESUME_FROM_HOST_BITS |
