@@ -18,6 +18,16 @@
 #include <zephyr/drivers/led_strip.h>
 #include <zephyr/logging/log.h>
 
+// Generated from ./VERSION by the build; see the Versioning section of the
+// top-level README. The version is logged at startup here and is also
+// available interactively via the `version` shell command (blinky_shell.c).
+#include <zephyr/app_version.h>
+
+// APP_BUILD_VERSION is generated as a bare token (the `git describe` output,
+// unquoted), so it has to be stringified before it can be printed.
+#define BLINKY_STR(s)  #s
+#define BLINKY_XSTR(s) BLINKY_STR(s)
+
 LOG_MODULE_REGISTER(blinky, LOG_LEVEL_INF);
 
 #define STRIP_NODE DT_ALIAS(led_strip)
@@ -44,6 +54,8 @@ int main(void)
 {
 	int rc;
 
+	LOG_INF("Bento blinky %s (build %s)", APP_VERSION_STRING,
+		BLINKY_XSTR(APP_BUILD_VERSION));
 	LOG_INF("WS2812 led_strip blinky | %d LED(s)", NUM_LEDS);
 
 	if (!device_is_ready(strip)) {
@@ -55,8 +67,6 @@ int main(void)
 
 	while (1) {
 		const struct color *c = &colors[idx];
-
-		LOG_INF("Color: %s (R=%02x G=%02x B=%02x)", c->name, c->r, c->g, c->b);
 
 		// Drive every LED in the chain to the same color.
 		for (size_t i = 0; i < NUM_LEDS; i++) {

@@ -73,6 +73,33 @@ Flashing with J-Link:
 west flash --build-dir sub3-zephyr-fw/build.bento/rp2350b/m33/blinky --runner jlink --reset
 ```
 
+### Versioning
+
+`app` and `blinky` are versioned independently, each from a `VERSION` file in
+its own directory (`app/VERSION`, `blinky/VERSION`). Zephyr generates
+`<zephyr/app_version.h>` from it at build time.
+
+For `app`, Zephyr registers the stock `app` shell command, so the version can
+be queried interactively:
+
+```sh
+app version            # 0.1.0
+app version-extended   # 0.1.0+0
+app build-version      # git describe, e.g. v0.1.0-3-g2c85d9224fca
+```
+
+`blinky` has no shell, so it logs its version once at startup instead:
+
+```
+Bento blinky 0.1.0 (build ca83aae68547)
+```
+
+To bump either version, edit the fields in that application's `VERSION` file
+and rebuild.
+
+The build version comes from `git describe --abbrev=12 --always`, so it falls
+back to a bare commit hash until the repo has a `v[0-9]*` tag.
+
 ## Links
 
 - PLT Demo Board Product page:
