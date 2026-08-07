@@ -11,3 +11,4 @@
 # From Zephyr SDK
 build/
 /zephyrproject/
+build.usbtest/

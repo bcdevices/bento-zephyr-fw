@@ -1,0 +1,7 @@
+tests:
+  bento.usb.regression:
+    platform_allow:
+      - native_sim
+    integration_platforms:
+      - native_sim
+    tags: usb regression
