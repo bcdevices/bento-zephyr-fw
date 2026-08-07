@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..e333cb57368 100644
+index b0fb2fcf44f..632045540f2 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,17 @@
@@ -29,7 +29,37 @@ index b0fb2fcf44f..e333cb57368 100644
  	uint8_t setup[8];
  };
  
-@@ -716,16 +729,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -126,7 +139,28 @@ static void ALWAYS_INLINE sie_status_clr(const struct device *dev, const uint32_
+ 	const struct rpi_pico_config *config = dev->config;
+ 	usb_hw_t *base = config->base;
+ 
+-	rpi_pico_bit_clr((mm_reg_t)&base->sie_status, bit);
++	/*
++	 * The event and error bits in SIE_STATUS are write-1-to-clear ("WC" in
++	 * the datasheet register listing): BUS_RESET, SETUP_REC, CRC_ERROR,
++	 * BIT_STUFF_ERROR, RX_TIMEOUT, RX_OVERFLOW, DATA_SEQ_ERROR, ...
++	 *
++	 * Upstream clears them through REG_ALIAS_CLR_BITS, the atomic
++	 * bitwise-clear alias, which writes 0 to the selected bits. For a
++	 * write-1-to-clear bit that is a no-op, so the latch is never actually
++	 * cleared: it stays asserted and the ISR re-observes the same event on
++	 * every subsequent interrupt.
++	 *
++	 * The consequences are severe. A single BUS_RESET latches permanently
++	 * and is then replayed indefinitely, so usbd_ch9 is knocked back to
++	 * USBD_STATE_DEFAULT over and over and enumeration can never complete
++	 * (observed: SET_ADDRESS and seven GET_DESCRIPTORs all handled at state
++	 * DEFAULT, the port never appearing). The error latches behave the same
++	 * way, which inflates the CRC and bit-stuff counts that made this look
++	 * like a physical-layer problem.
++	 *
++	 * Write the bits directly so the 1s actually reach the register.
++	 */
++	sys_write32(bit, (mm_reg_t)&base->sie_status);
+ }
+ 
+ static inline uint32_t get_ep_mask(const uint8_t ep)
+@@ -716,16 +750,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
  	}
  
@@ -138,7 +168,7 @@ index b0fb2fcf44f..e333cb57368 100644
  	}
  
  	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
-@@ -733,19 +829,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -733,19 +850,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
  
  		priv->rwu_pending = false;
@@ -172,7 +202,7 @@ index b0fb2fcf44f..e333cb57368 100644
  		handled |= USB_INTS_BUS_RESET_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
  
-@@ -812,6 +915,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -812,6 +936,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_SETUP_REQ_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
  
