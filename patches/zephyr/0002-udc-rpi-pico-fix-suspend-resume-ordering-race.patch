@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..4e09031cd3f 100644
+index b0fb2fcf44f..645df251baa 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,24 @@
@@ -66,7 +66,7 @@ index b0fb2fcf44f..4e09031cd3f 100644
  }
  
  static inline uint32_t get_ep_mask(const uint8_t ep)
-@@ -220,9 +261,36 @@ static void rpi_pico_ep_cancel(const struct device *dev, const uint8_t ep)
+@@ -220,9 +261,45 @@ static void rpi_pico_ep_cancel(const struct device *dev, const uint8_t ep)
  	}
  
  	if (abort_handshake_supported) {
@@ -93,8 +93,17 @@ index b0fb2fcf44f..4e09031cd3f 100644
 +
  		while ((sys_read32(abort_done_reg) & ep_mask) != ep_mask) {
 +			if (++spins > RPI_PICO_ABORT_SPIN_LIMIT) {
++				/*
++				 * The SIE may still own the buffer. Falling
++				 * through would modify buf_ctrl underneath it
++				 * -- the concurrent-access hazard this
++				 * handshake exists to prevent -- and would tell
++				 * the upper layer the endpoint is idle when it
++				 * is not. Leave it marked busy instead.
++				 */
 +				LOG_ERR("ep 0x%02x abort handshake timed out", ep);
-+				break;
++				rpi_pico_bit_clr(abort_reg, ep_mask);
++				return;
 +			}
  		}
 +
@@ -103,7 +112,58 @@ index b0fb2fcf44f..4e09031cd3f 100644
  	}
  
  	buf_ctrl &= ~USB_BUF_CTRL_AVAIL;
-@@ -649,12 +717,34 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
+@@ -232,6 +309,30 @@ static void rpi_pico_ep_cancel(const struct device *dev, const uint8_t ep)
+ 		rpi_pico_bit_clr(abort_reg, ep_mask);
+ 	}
+ 
++	/*
++	 * Undo the data-toggle step burned by the cancelled arm.
++	 *
++	 * prep_rx()/prep_tx() advance next_pid when a transfer is *queued*.
++	 * Cancelling it means the host never saw that PID, so without a
++	 * rollback the next arm uses the wrong one and the host silently
++	 * discards every packet as a duplicate.
++	 *
++	 * Recovery is not automatic, which is what makes this permanent: a
++	 * sequence error sets SIE_STATUS.DATA_SEQ_ERROR but does NOT touch
++	 * BUFF_STATUS, so no completion is raised, the driver thread is never
++	 * woken, and rpi_pico_handle_xfer_next() -- the only path that would
++	 * re-arm with a fresh PID -- never runs.
++	 *
++	 * Unlike a rollback attempted after a TRANSACTION error (which carries
++	 * no information about whether the host accepted the data, and which
++	 * measurably made things worse when tried), this is deterministic: we
++	 * armed the PID, we are aborting it, the host never observed it.
++	 *
++	 * EP0 is unaffected either way -- rpi_pico_handle_setup() forces
++	 * next_pid = 1 on both control endpoints after cancelling them.
++	 */
++	get_ep_data(dev, ep)->next_pid ^= 1U;
++
+ 	udc_ep_set_busy(ep_cfg, false);
+ 	LOG_INF("Canceled ep 0x%02x transaction", ep);
+ }
+@@ -588,7 +689,19 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+ 
+ 	buf = udc_buf_peek(ep_cfg);
+ 	if (buf == NULL) {
++		/*
++		 * No queued buffer to receive this completion. Release the
++		 * endpoint so a later enqueue can re-arm it.
++		 *
++		 * UDC_EVT_ERROR is cosmetic here: usbd_core's handler only logs
++		 * and publishes a message -- it performs no endpoint reset and
++		 * no re-arm. Leaving stat.busy set means the endpoint is never
++		 * armed again, because re-arming only ever happens from a
++		 * completion that can no longer occur, so a transient buffer
++		 * shortage killed reception permanently.
++		 */
+ 		LOG_ERR("No buffer for ep 0x%02x", ep);
++		udc_ep_set_busy(ep_cfg, false);
+ 		udc_submit_event(dev, UDC_EVT_ERROR, -ENOBUFS);
+ 		return;
+ 	}
+@@ -649,12 +762,34 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
  
  	buf_status = sys_read32((mm_reg_t)&base->buf_status);
  
@@ -139,7 +199,7 @@ index b0fb2fcf44f..4e09031cd3f 100644
  		/* Odd bits in the register correspond to OUT endpoints */
  		if (i & 1U) {
  			ep = USB_EP_DIR_OUT | (i >> 1U);
-@@ -716,16 +806,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -716,16 +851,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
  	}
  
@@ -248,7 +308,7 @@ index b0fb2fcf44f..4e09031cd3f 100644
  	}
  
  	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
-@@ -733,19 +906,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -733,19 +951,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
  
  		priv->rwu_pending = false;
@@ -282,7 +342,7 @@ index b0fb2fcf44f..4e09031cd3f 100644
  		handled |= USB_INTS_BUS_RESET_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
  
-@@ -812,6 +992,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -812,6 +1037,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_SETUP_REQ_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
  

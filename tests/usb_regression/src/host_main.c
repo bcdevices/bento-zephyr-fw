@@ -1,10 +1,32 @@
 #include "../host_shim.h"
+#include "test_attack_cdc.c"
+#include "test_attack_udc.c"
 #include "test_captured.c"
 #include "test_state.c"
 #include "test_w1c.c"
 int main(void)
 {
 	printf("USB regression tests\n");
+	run_usb_attack_cdc_test_stale_abort_must_not_release_new_claim();
+	run_usb_attack_cdc_test_stale_abort_reproduces_captured_wedge();
+	run_usb_attack_cdc_test_enable_arms_rx_without_irq_rx_enabled();
+	run_usb_attack_cdc_test_no_rearm_path_survives_lost_completion();
+	run_usb_attack_cdc_test_zlp_needed_latches_while_suspended();
+	run_usb_attack_cdc_test_write_during_inflight_tx_is_not_lost();
+	run_usb_attack_cdc_test_poll_out_during_inflight_is_covered_by_completion();
+	run_usb_attack_cdc_test_notif_sem_reset_leaves_caller_blocked_forever();
+	run_usb_attack_cdc_test_notif_sem_eagain_check_is_dead_code();
+	run_usb_attack_cdc_test_disable_and_error_path_double_release();
+	run_usb_attack_udc_test_dequeue_desyncs_data_toggle();
+	run_usb_attack_udc_test_toggle_desync_is_permanent();
+	run_usb_attack_udc_test_set_halt_out_burns_toggle_step();
+	run_usb_attack_udc_test_clear_halt_reset_to_data0_is_correct();
+	run_usb_attack_udc_test_setup_forced_pid_masks_ep0_cancel();
+	run_usb_attack_udc_test_ep_enable_must_reset_toggle();
+	run_usb_attack_udc_test_abort_timeout_must_not_touch_buf_ctrl();
+	run_usb_attack_udc_test_abandoned_set_address_corrupts_later_transfer();
+	run_usb_attack_udc_test_stale_post_status_applies_wrong_address();
+	run_usb_attack_udc_test_enobufs_leaves_out_endpoint_dead();
 	run_usb_captured_test_active_bus_sie_status();
 	run_usb_captured_test_genuinely_suspended_sie_status();
 	run_usb_captured_test_bus_reset_sie_status();

@@ -1,5 +1,5 @@
 diff --git i/subsys/usb/device_next/usbd_ch9.c w/subsys/usb/device_next/usbd_ch9.c
-index 599eb161178..19393ce4ece 100644
+index 599eb161178..d7297156aca 100644
 --- i/subsys/usb/device_next/usbd_ch9.c
 +++ w/subsys/usb/device_next/usbd_ch9.c
 @@ -24,6 +24,15 @@
@@ -65,3 +65,27 @@ index 599eb161178..19393ce4ece 100644
  	if (err && err != -ENOMEM && !bi->setup) {
  		if (err == -ECONNABORTED) {
  			LOG_INF("Transfer 0x%02x aborted (bus reset?)", bi->ep);
+@@ -1161,6 +1203,23 @@ int usbd_handle_ctrl_xfer(struct usbd_context *const uds_ctx,
+ 	if (bi->setup && bi->ep == USB_CONTROL_EP_OUT) {
+ 		struct net_buf *next_buf;
+ 
++		/*
++		 * A new SETUP supersedes any transfer still in progress, so
++		 * drop a deferred post-status action left over from one that
++		 * was abandoned.
++		 *
++		 * post_status_stage() re-reads the *current* setup packet. On
++		 * controllers without addr_before_status (the RP2350 among
++		 * them) SET_ADDRESS sets ch9_data.state to ADDRESS immediately
++		 * but defers the hardware write to the status stage. If that
++		 * status stage never completes and a fresh SETUP arrives, the
++		 * stale flag makes the deferred action run against the wrong
++		 * request: the address is never written while the state still
++		 * claims ADDRESS, so host and device disagree about the address
++		 * with no recovery short of a bus reset.
++		 */
++		uds_ctx->ch9_data.post_status = false;
++
+ 		if (ctrl_xfer_get_setup(uds_ctx, buf)) {
+ 			LOG_ERR("Malformed setup packet");
+ 			net_buf_unref(buf);
