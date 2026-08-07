@@ -1,40 +1,152 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..a228a69b55c 100644
+index b0fb2fcf44f..e333cb57368 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
-@@ -728,6 +728,31 @@ static void rpi_pico_isr_handler(const struct device *dev)
- 		udc_submit_event(dev, UDC_EVT_RESUME, 0);
+@@ -23,6 +23,17 @@
+ #include <zephyr/logging/log.h>
+ LOG_MODULE_REGISTER(udc_rpi_pico, CONFIG_UDC_DRIVER_LOG_LEVEL);
+ 
++/*
++ * Minimum bus-idle time before a reported suspend is believed. USB specifies
++ * suspend as >=3 ms of idle; the margin covers ISR latency and the
++ * millisecond granularity of the uptime clock.
++ */
++#define RPI_PICO_SUSPEND_IDLE_MS 5
++
++#include <zephyr/drivers/usb/udc_rpi_pico_trace.h>
++
++struct udc_rpi_pico_susp_trace udc_rpi_pico_susp_trace;
++
+ struct rpi_pico_config {
+ 	usb_hw_t *base;
+ 	usb_device_dpram_t *dpram;
+@@ -68,6 +79,8 @@ struct rpi_pico_data {
+ 	struct rpi_pico_ep_data out_ep[USB_NUM_ENDPOINTS];
+ 	struct rpi_pico_ep_data in_ep[USB_NUM_ENDPOINTS];
+ 	bool rwu_pending;
++	uint32_t last_sof;
++	uint32_t last_sof_time;
+ 	uint8_t setup[8];
+ };
+ 
+@@ -716,16 +729,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
  	}
  
+-	if ((status & (USB_INTS_BUFF_STATUS_BITS | USB_INTS_SETUP_REQ_BITS)) &&
+-	    priv->rwu_pending) {
+-		/* The rpi pico USB device does not appear to be sending
+-		 * USB_INTR_DEV_RESUME_FROM_HOST interrupts when the resume is
+-		 * a result of a remote wakeup request sent by us.
+-		 * This will simulate a resume event if bus activity is observed
+-		 */
 +	/*
-+	 * Suspend is handled BEFORE resume, deliberately.
++	 * Recover from a resume the controller never reported.
 +	 *
-+	 * Both bits can be set in a single ISR pass when the host suspends and
-+	 * resumes faster than interrupt latency -- which happens routinely when
-+	 * a device sits briefly idle between transfers. Processing resume first
-+	 * (as upstream does) then lets the stale suspend overwrite it, leaving
-+	 * the driver marked suspended after a resume that already completed.
++	 * The RP2350 does not reliably raise DEV_RESUME_FROM_HOST. Upstream
++	 * already works around this for resumes triggered by our own remote
++	 * wakeup (guarded by rwu_pending), but the same interrupt is also lost
++	 * on host-initiated resume, and nothing covered that case: the SIE
++	 * clears SIE_STATUS.SUSPENDED by itself once bus activity returns, while
++	 * the driver is never told and stays marked suspended forever.
 +	 *
-+	 * Both SIE latches have been cleared by then, so no further suspend or
-+	 * resume interrupt arrives to correct it: the device stays suspended
-+	 * forever. CDC_ACM_CLASS_SUSPENDED then makes cdc_acm_tx_fifo_handler()
-+	 * return early on every call, so the port goes permanently silent while
-+	 * the device remains enumerated and otherwise healthy.
++	 * Measured on a wedged board: susp=1, res=0, driver suspended, yet
++	 * SIE_STATUS = 0x40851005 (ACK_REC | TRANS_COMPLETE | CONNECTED |
++	 * RX_SHORT_PACKET, SUSPENDED clear) -- the bus is plainly active. With
++	 * CDC_ACM_CLASS_SUSPENDED set, cdc_acm_tx_fifo_handler() returns early
++	 * on every call and the port is silent until the device is reset.
 +	 *
-+	 * Ordering suspend first means the later, real event wins.
++	 * Any endpoint or setup activity means the bus is live, so treat it as
++	 * the resume that was never delivered. Cross-checking the hardware
++	 * SUSPENDED bit keeps this from firing while genuinely suspended.
 +	 */
++	/*
++	 * Validate suspend against SOF activity before believing it.
++	 *
++	 * The RP2350 SIE spuriously asserts SIE_STATUS.SUSPENDED on a fully
++	 * active bus. Measured on a wedged board: the SOF frame counter
++	 * (SOF_RD) advancing at the nominal 1000 frames/s while SUSPENDED
++	 * flickered set and clear between reads. The host was never suspending
++	 * the device.
++	 *
++	 * A device receiving SOFs is by definition not suspended, so SOF_RD is
++	 * authoritative and SUSPENDED is not. Acting on a false suspend is
++	 * destructive: it tears down in-flight transfers, and the completions
++	 * that would have cleared the class driver's RX/TX busy flags never
++	 * arrive, so reception is never re-armed and the port goes silent.
++	 *
++	 * Timestamp frame arrivals rather than merely comparing counter values:
++	 * two interrupts can land inside the same 1 ms frame, which would make
++	 * a naive "counter did not move" test report a stall that is not real.
++	 * USB defines suspend as >=3 ms of idle, so require a margin beyond
++	 * that before believing it.
++	 */
++	{
++		uint32_t sof = sys_read32((mm_reg_t)&base->sof_rd) &
++			       USB_SOF_RD_BITS;
+ 
+-		priv->rwu_pending = false;
+-		udc_submit_event(dev, UDC_EVT_RESUME, 0);
++		if (sof != priv->last_sof) {
++			priv->last_sof = sof;
++			priv->last_sof_time = k_uptime_get_32();
++
++			/*
++			 * Frames are arriving, so the bus is running. If the
++			 * driver still thinks it is suspended, the resume
++			 * interrupt was never delivered -- the RP2350 drops it
++			 * routinely, and upstream only works around the case
++			 * where we requested the wakeup ourselves. Recover here
++			 * for host-initiated resume too, otherwise the device
++			 * stays suspended forever on a live bus and the class
++			 * driver never sends or receives again.
++			 */
++			if (udc_is_suspended(dev)) {
++				udc_rpi_pico_susp_trace.synth_resumes++;
++				udc_set_suspended(dev, false);
++				udc_rpi_pico_susp_trace.sw_suspended = 0;
++				priv->rwu_pending = false;
++				udc_submit_event(dev, UDC_EVT_RESUME, 0);
++			}
++		}
++	}
++
 +	if (status & USB_INTS_DEV_SUSPEND_BITS) {
++		uint32_t idle_ms = k_uptime_get_32() - priv->last_sof_time;
++
 +		handled |= USB_INTS_DEV_SUSPEND_BITS;
 +		sie_status_clr(dev, USB_SIE_STATUS_SUSPENDED_BITS);
 +
-+		udc_set_suspended(dev, true);
-+		udc_submit_event(dev, UDC_EVT_SUSPEND, 0);
-+	}
++		if (idle_ms < RPI_PICO_SUSPEND_IDLE_MS) {
++			/*
++			 * Frames arrived within the last few milliseconds, so
++			 * the bus is active and this suspend is spurious (see
++			 * the SOF validation above). Clearing the latch is
++			 * still correct; only the state change is suppressed.
++			 */
++			udc_rpi_pico_susp_trace.false_suspends++;
++		} else {
++			udc_rpi_pico_susp_trace.suspends++;
++			udc_rpi_pico_susp_trace.sie_at_suspend =
++				sys_read32((mm_reg_t)&base->sie_status);
++			udc_rpi_pico_susp_trace.last_status = status;
 +
++			udc_set_suspended(dev, true);
++			udc_rpi_pico_susp_trace.sw_suspended = 1;
++			udc_submit_event(dev, UDC_EVT_SUSPEND, 0);
++		}
+ 	}
+ 
  	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
- 		handled |= USB_INTR_DEV_RESUME_FROM_HOST_BITS;
+@@ -733,19 +829,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
-@@ -737,13 +762,6 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 
+ 		priv->rwu_pending = false;
++		udc_rpi_pico_susp_trace.resumes++;
++		udc_rpi_pico_susp_trace.sie_at_resume =
++			sys_read32((mm_reg_t)&base->sie_status);
+ 		udc_set_suspended(dev, false);
++		udc_rpi_pico_susp_trace.sw_suspended = 0;
  		udc_submit_event(dev, UDC_EVT_RESUME, 0);
  	}
  
@@ -47,4 +159,24 @@ index b0fb2fcf44f..a228a69b55c 100644
 -	}
  
  	if (status & USB_INTS_BUS_RESET_BITS) {
++		/* Sample BEFORE clearing, so the recorded state reflects the
++		 * line condition that caused the reset rather than the state
++		 * left behind by clearing the latch.
++		 */
++		udc_rpi_pico_susp_trace.sie_at_reset =
++			sys_read32((mm_reg_t)&base->sie_status);
++		udc_rpi_pico_susp_trace.addr_at_reset =
++			sys_read32((mm_reg_t)&base->dev_addr_ctrl);
++		udc_rpi_pico_susp_trace.bus_resets++;
++
  		handled |= USB_INTS_BUS_RESET_BITS;
+ 		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
+ 
+@@ -812,6 +915,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		handled |= USB_INTS_SETUP_REQ_BITS;
+ 		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
+ 
++		udc_rpi_pico_susp_trace.setups++;
+ 		rpi_pico_handle_setup(dev);
+ 	}
+ 

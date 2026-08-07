@@ -1,0 +1,45 @@
+diff --git i/subsys/usb/device_next/usbd_ch9.c w/subsys/usb/device_next/usbd_ch9.c
+index 599eb161178..4af79fca4f7 100644
+--- i/subsys/usb/device_next/usbd_ch9.c
++++ w/subsys/usb/device_next/usbd_ch9.c
+@@ -24,6 +24,15 @@
+ #include <zephyr/logging/log.h>
+ LOG_MODULE_REGISTER(usbd_ch9, CONFIG_USBD_LOG_LEVEL);
+ 
++/* Wedge-investigation counters; local diagnostic, not upstream API. */
++uint32_t usbd_ch9_setup_count;
++uint16_t usbd_ch9_reqlog[16];
++uint8_t  usbd_ch9_reqlog_idx;
++uint8_t  usbd_ch9_state_log[16];
++uint32_t usbd_ch9_last_req;
++uint32_t usbd_ch9_err_count;
++uint32_t usbd_ch9_last_err;
++
+ #define CTRL_AWAIT_SETUP_DATA		0
+ #define CTRL_AWAIT_STATUS_STAGE		1
+ 
+@@ -1142,6 +1151,24 @@ int usbd_handle_ctrl_xfer(struct usbd_context *const uds_ctx,
+ 		return -EIO;
+ 	}
+ 
++	if (bi->setup) {
++		uint8_t i = usbd_ch9_reqlog_idx & 0xf;
++
++		usbd_ch9_setup_count++;
++		usbd_ch9_last_req = ((uint32_t)setup->bmRequestType << 24) |
++				    ((uint32_t)setup->bRequest << 16) |
++				    (uint32_t)setup->wValue;
++		usbd_ch9_reqlog[i] = ((uint16_t)setup->bmRequestType << 8) |
++				     setup->bRequest;
++		usbd_ch9_state_log[i] = (uint8_t)uds_ctx->ch9_data.state;
++		usbd_ch9_reqlog_idx++;
++	}
++
++	if (err) {
++		usbd_ch9_err_count++;
++		usbd_ch9_last_err = (uint32_t)(-err);
++	}
++
+ 	if (err && err != -ENOMEM && !bi->setup) {
+ 		if (err == -ECONNABORTED) {
+ 			LOG_INF("Transfer 0x%02x aborted (bus reset?)", bi->ep);

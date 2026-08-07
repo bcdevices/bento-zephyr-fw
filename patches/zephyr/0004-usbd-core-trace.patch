@@ -1,0 +1,41 @@
+diff --git i/subsys/usb/device_next/usbd_core.c w/subsys/usb/device_next/usbd_core.c
+index 9f24530fc2c..1817a9d2dee 100644
+--- i/subsys/usb/device_next/usbd_core.c
++++ w/subsys/usb/device_next/usbd_core.c
+@@ -59,13 +59,21 @@ static int event_handler_ep_request(struct usbd_context *const uds_ctx,
+ 	return ret;
+ }
+ 
++uint32_t usbd_core_evt_susp;
++uint32_t usbd_core_evt_res;
++uint32_t usbd_core_bcast_blocked;
++uint32_t usbd_core_ch9_state;
++
+ static void usbd_class_bcast_event(struct usbd_context *const uds_ctx,
+ 				   struct udc_event *const event)
+ {
+ 	struct usbd_config_node *cfg_nd;
+ 	struct usbd_class_node *c_nd;
+ 
++	usbd_core_ch9_state = (uint32_t)uds_ctx->ch9_data.state;
++
+ 	if (!usbd_state_is_configured(uds_ctx)) {
++		usbd_core_bcast_blocked++;
+ 		return;
+ 	}
+ 
+@@ -148,12 +156,14 @@ static ALWAYS_INLINE void usbd_event_handler(struct usbd_context *const uds_ctx,
+ 		usbd_msg_pub_simple(uds_ctx, USBD_MSG_VBUS_READY, 0);
+ 		break;
+ 	case UDC_EVT_SUSPEND:
++		usbd_core_evt_susp++;
+ 		LOG_DBG("SUSPEND event");
+ 		usbd_status_suspended(uds_ctx, true);
+ 		usbd_class_bcast_event(uds_ctx, event);
+ 		usbd_msg_pub_simple(uds_ctx, USBD_MSG_SUSPEND, 0);
+ 		break;
+ 	case UDC_EVT_RESUME:
++		usbd_core_evt_res++;
+ 		LOG_DBG("RESUME event");
+ 		usbd_status_suspended(uds_ctx, false);
+ 		usbd_class_bcast_event(uds_ctx, event);

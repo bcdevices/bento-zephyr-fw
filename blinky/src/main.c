@@ -113,6 +113,27 @@ static const struct color colors[] = {
  * the map file identifies the exact semaphore/event/mutex holding things up,
  * which discriminates between every theory on the table at once.
  */
+#include <zephyr/drivers/usb/udc_rpi_pico_trace.h>
+extern int usbd_cdc_acm_diag(const struct device *dev, uint32_t *tx_pending,
+			     uint32_t *rx_pending);
+extern uint32_t usbd_cdc_acm_susp_calls;
+extern uint32_t usbd_cdc_acm_res_calls;
+extern uint32_t usbd_cdc_acm_rxbusy_sets;
+extern uint32_t usbd_core_evt_susp;
+extern uint32_t usbd_core_evt_res;
+extern uint32_t usbd_core_bcast_blocked;
+extern uint32_t usbd_core_ch9_state;
+extern uint32_t usbd_ch9_setup_count;
+extern uint32_t usbd_ch9_last_req;
+extern uint32_t usbd_ch9_err_count;
+extern uint32_t usbd_ch9_last_err;
+extern uint16_t usbd_ch9_reqlog[16];
+extern uint8_t  usbd_ch9_reqlog_idx;
+extern uint8_t  usbd_ch9_state_log[16];
+
+#define USB_BASE_ADDR      DT_REG_ADDR(DT_NODELABEL(usbd))
+#define USB_REG_SIE_STATUS (USB_BASE_ADDR + 0x50U)
+
 static void wedge_report_thread(const struct k_thread *thread, void *user_data)
 {
 	ARG_UNUSED(user_data);
@@ -137,6 +158,52 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 		k_msleep(5000);
 
 		printk("\n--- wedge monitor @ %lld ms ---\n", k_uptime_get());
+		printk("  susp=%u res=%u synth=%u synthS=%u false=%u both=%u sw_susp=%u hw_sie=%08x "
+		       "sie@susp=%08x sie@res=%08x\n",
+		       udc_rpi_pico_susp_trace.suspends,
+		       udc_rpi_pico_susp_trace.resumes,
+		       udc_rpi_pico_susp_trace.synth_resumes,
+		       udc_rpi_pico_susp_trace.synth_suspends,
+		       udc_rpi_pico_susp_trace.false_suspends,
+		       udc_rpi_pico_susp_trace.both_same_isr,
+		       udc_rpi_pico_susp_trace.sw_suspended,
+		       sys_read32(USB_REG_SIE_STATUS),
+		       udc_rpi_pico_susp_trace.sie_at_suspend,
+		       udc_rpi_pico_susp_trace.sie_at_resume);
+		{
+			const struct device *cdc =
+				DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
+			uint32_t txp = 0, rxp = 0;
+			int st = usbd_cdc_acm_diag(cdc, &txp, &rxp);
+
+			printk("  cdc state=%02x tx_pending=%u rx_pending=%u "
+			       "cls_susp=%u cls_res=%u rxarm=%u\n",
+			       st, txp, rxp, usbd_cdc_acm_susp_calls,
+			       usbd_cdc_acm_res_calls, usbd_cdc_acm_rxbusy_sets);
+			printk("  core susp_evt=%u res_evt=%u blocked=%u ch9=%u\n",
+			       usbd_core_evt_susp, usbd_core_evt_res,
+			       usbd_core_bcast_blocked, usbd_core_ch9_state);
+			printk("  bus resets=%u setups=%u sie@reset=%08x "
+			       "addr@reset=%08x\n",
+			       udc_rpi_pico_susp_trace.bus_resets,
+			       udc_rpi_pico_susp_trace.setups,
+			       udc_rpi_pico_susp_trace.sie_at_reset,
+			       udc_rpi_pico_susp_trace.addr_at_reset);
+			printk("  ch9 setups=%u last_req=%08x errs=%u last_err=%u\n",
+			       usbd_ch9_setup_count, usbd_ch9_last_req,
+			       usbd_ch9_err_count, usbd_ch9_last_err);
+			printk("  ch9 log(req@state):");
+			for (int k = 0; k < 16; k++) {
+				int idx = (usbd_ch9_reqlog_idx + k) & 0xf;
+
+				if (usbd_ch9_reqlog[idx] == 0) {
+					continue;
+				}
+				printk(" %04x@%u", usbd_ch9_reqlog[idx],
+				       usbd_ch9_state_log[idx]);
+			}
+			printk("\n");
+		}
 
 		/*
 		 * The thread dump alone cannot distinguish "everything finished
