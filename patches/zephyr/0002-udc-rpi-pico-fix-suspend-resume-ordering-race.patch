@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..645df251baa 100644
+index b0fb2fcf44f..b35b018a2d5 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,24 @@
@@ -348,5 +348,36 @@ index b0fb2fcf44f..645df251baa 100644
  
 +		udc_rpi_pico_susp_trace.setups++;
  		rpi_pico_handle_setup(dev);
+ 	}
+ 
+@@ -975,6 +1201,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
+ 		/* Cancel responds with a STALL handshake.*/
+ 		rpi_pico_ep_cancel(dev, cfg->addr);
+ 	} else {
++		/*
++		 * KNOWN BUG, deliberately NOT fixed here -- see
++		 * test_clear_halt_in_stomps_toggle_of_live_arm in
++		 * tests/usb_regression/src/test_regmodel.c, which pins it.
++		 *
++		 * This path only clears STALL. Unlike the OUT path above it
++		 * does not cancel, so a transfer armed before the halt is still
++		 * owned by the controller with its PID committed in buf_ctrl
++		 * when next_pid is reset to 0 below. When that arm completes
++		 * the host advances its toggle and the driver does not, and the
++		 * endpoint never recovers: a sequence error sets
++		 * SIE_STATUS.DATA_SEQ_ERROR but raises no BUFF_STATUS bit, so
++		 * no completion ever arrives to drive a re-arm.
++		 *
++		 * Resetting to DATA0 is itself correct (USB 2.0 section 9.4.5,
++		 * CLEAR_FEATURE(ENDPOINT_HALT) resets both sides); the defect is
++		 * doing it underneath a live transfer.
++		 *
++		 * An attempted fix -- calling rpi_pico_ep_cancel() here to
++		 * quiesce first -- did not satisfy the pinning test and was
++		 * reverted rather than shipped unvalidated. Fixing this
++		 * correctly needs hardware to confirm what set_halt() leaves in
++		 * buf_ctrl for an IN endpoint with an outstanding arm.
++		 */
+ 		rpi_pico_bit_clr(buf_ctrl_reg, USB_BUF_CTRL_STALL);
  	}
  
