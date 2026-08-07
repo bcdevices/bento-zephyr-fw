@@ -1,0 +1,50 @@
+diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
+index b0fb2fcf44f..a228a69b55c 100644
+--- i/drivers/usb/udc/udc_rpi_pico.c
++++ w/drivers/usb/udc/udc_rpi_pico.c
+@@ -728,6 +728,31 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		udc_submit_event(dev, UDC_EVT_RESUME, 0);
+ 	}
+ 
++	/*
++	 * Suspend is handled BEFORE resume, deliberately.
++	 *
++	 * Both bits can be set in a single ISR pass when the host suspends and
++	 * resumes faster than interrupt latency -- which happens routinely when
++	 * a device sits briefly idle between transfers. Processing resume first
++	 * (as upstream does) then lets the stale suspend overwrite it, leaving
++	 * the driver marked suspended after a resume that already completed.
++	 *
++	 * Both SIE latches have been cleared by then, so no further suspend or
++	 * resume interrupt arrives to correct it: the device stays suspended
++	 * forever. CDC_ACM_CLASS_SUSPENDED then makes cdc_acm_tx_fifo_handler()
++	 * return early on every call, so the port goes permanently silent while
++	 * the device remains enumerated and otherwise healthy.
++	 *
++	 * Ordering suspend first means the later, real event wins.
++	 */
++	if (status & USB_INTS_DEV_SUSPEND_BITS) {
++		handled |= USB_INTS_DEV_SUSPEND_BITS;
++		sie_status_clr(dev, USB_SIE_STATUS_SUSPENDED_BITS);
++
++		udc_set_suspended(dev, true);
++		udc_submit_event(dev, UDC_EVT_SUSPEND, 0);
++	}
++
+ 	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
+ 		handled |= USB_INTR_DEV_RESUME_FROM_HOST_BITS;
+ 		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
+@@ -737,13 +762,6 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		udc_submit_event(dev, UDC_EVT_RESUME, 0);
+ 	}
+ 
+-	if (status & USB_INTS_DEV_SUSPEND_BITS) {
+-		handled |= USB_INTS_DEV_SUSPEND_BITS;
+-		sie_status_clr(dev, USB_SIE_STATUS_SUSPENDED_BITS);
+-
+-		udc_set_suspended(dev, true);
+-		udc_submit_event(dev, UDC_EVT_SUSPEND, 0);
+-	}
+ 
+ 	if (status & USB_INTS_BUS_RESET_BITS) {
+ 		handled |= USB_INTS_BUS_RESET_BITS;

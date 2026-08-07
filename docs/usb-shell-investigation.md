@@ -4,18 +4,36 @@
 **Firmware:** Zephyr 4.3.0 + out-of-tree patches
 **Symptom:** Interactive shell over USB CDC-ACM freezes mid-output, typically
 during `help`, and never recovers. Position of the freeze varies between runs.
-**Status:** Root cause identified — a **data-toggle desynchronisation bug in
-`udc_rpi_pico.c`**. CRC errors on the wire are the trigger, but they are normal
-and survivable; the driver turns the first one into a permanently dead
-endpoint. Fixed in patch 0002.
+**Status:** A suspend/resume ordering race in `udc_rpi_pico` was found and
+fixed (patch 0002). It is a real bug and measurably improves the failure rate,
+but the port still wedges eventually — the investigation is **not closed**.
 
-> **Note on earlier revisions of this document.** This report previously
-> concluded the fault was physical-layer and that firmware could only mitigate
-> it. That was wrong. Every USB link has some CRC error rate and the protocol
-> is designed to retry through it; a correct driver does not fail. The physical
-> layer determines *how often* the bug is hit, not *whether* it is fatal.
+> **Note on earlier revisions of this document.** Previous versions asserted,
+> in turn, that the root cause was a lost TX completion, a ZLP latch, shell
+> backpressure, a TXDONE wakeup race, a data-toggle desynchronisation, and the
+> USB physical layer. All were tested on hardware and disproved. They are kept
+> in §5 so they are not re-attempted.
+>
+> The method that finally worked: drive the board directly from a host script,
+> count transactions until failure, vary one parameter at a time, and read the
+> registers over J-Link at the moment of failure. Reasoning from the Zephyr
+> source alone produced six wrong answers in a row.
 
----
+## 0. The finding that mattered
+
+**Slower pacing between transactions made the failure happen sooner.**
+
+| Pacing | Stock 4.3.0 died at |
+|---|---|
+| none | transaction 7 |
+| 0.15 s | transaction 22 |
+| 0.3 s | transaction 17 |
+| 1.0 s | **transaction 4** |
+
+Every load-based theory predicts the opposite. That single inversion pointed
+at idle-time behaviour — i.e. USB suspend — and led directly to the race in
+§2a. It was measurable in about ten minutes once the board was driven from a
+script instead of by hand.
 
 ## 1. The failure, precisely
 
@@ -30,92 +48,50 @@ Input dies with output because the shell's state machine is pumped from its
 shell thread never returns to reading input, so the console appears completely
 dead rather than merely silent. This is a consequence, not the cause.
 
-## 2. Smoking gun
+## 2. Earlier reading of the register state (superseded)
 
-On a wedged board, read over UART (the console is deliberately kept on UART1 so
-it survives a USB failure):
+An earlier wedged-board capture showed latched `SIE_STATUS.ENDPOINT_ERROR`
+with `EP_TX_ERROR` non-zero and heavy CRC counts, and this document previously
+presented that as the root cause. It is **not**. Those dumps came from builds
+carrying several of my own speculative patches, some of which generated the
+errors they appeared to diagnose. On pristine 4.3.0 the wedged state shows
+`EP_TX_ERROR = 0`, `EP_RX_ERROR = 0`, `BUFF_STATUS = 0` and simply
+`SIE_STATUS.SUSPENDED` set — see §2a.
 
-```
-usb   INTE=0021fbf0 INTS=00000000 BUFF_STATUS=00000000
-      SIE_CTRL=20010000 SIE_STATUS=40851005
-usb_ep tx_err=00000010 rx_err=00000001
-sie_err crc=100 bitstuff=0 dataseq=0 rxto=1 rxovf=0
-shell_tx used=0 free=8192 tx_busy=0 state=2
-```
+The genuinely useful observation from that period is that CRC errors alone
+never explain a *permanent* failure: USB retries through them. A failure that
+survives retry is a state-machine bug, which is what §2a turned out to be.
 
-Three facts, together, identify the failure:
+## 2a. Confirmed bug: suspend/resume ordering race
 
-1. **`SIE_STATUS` bit 23 (`ENDPOINT_ERROR`) is latched.** The hardware is
-   reporting that an endpoint's transmit path failed.
-2. **`EP_TX_ERROR` shows EP1 (CDC bulk IN — the shell's output path) saturated
-   at its 2-bit maximum**, then errors migrating to EP2. These are
-   hardware-maintained per-endpoint error counters.
-3. **Everything in software is idle.** `BUFF_STATUS=0` (no completions
-   pending), shell TX ring buffer empty (`used=0`), `tx_busy=0`, and every
-   thread in its normal idle wait. Nothing is stuck; nothing is waiting.
+`rpi_pico_isr_handler()` takes one snapshot of the interrupt status and handles
+`DEV_RESUME_FROM_HOST` **before** `DEV_SUSPEND`. Both bits can be set in a
+single ISR pass when the host suspends and resumes faster than interrupt
+latency — routine whenever the device idles briefly between transfers.
 
-The SIE abandoned the endpoint. No completion interrupt is ever raised, so the
-class driver and shell settle believing their work is done. Output stops
-permanently with **no error surfaced anywhere in software**.
+  1. Resume runs first and clears the suspended flag.
+  2. The stale suspend then runs and sets it again.
 
-**Error profile is narrow and consistent across every run:** CRC errors only.
-Bit-stuff = 0, data-sequence ≈ 0, RX-overflow = 0, RX-timeout ≈ 1. CRC and
-bit-stuff errors are generated by the USB hardware's serial interface engine
-and **cannot be produced by firmware timing**. The signature for firmware
-starving the controller is RX_TIMEOUT / RX_OVERFLOW, and those are absent.
+The driver ends up marked suspended after a resume that already completed.
+Both SIE latches are clear by then, so no further interrupt corrects it.
 
-`ep_tx_errors` tracks `crc` nearly 1:1 across all samples (29/33, 38/44,
-49/53, 65/68). The endpoint errors *are* the CRC errors — one phenomenon.
+`CDC_ACM_CLASS_SUSPENDED` then makes `cdc_acm_tx_fifo_handler()` return early
+on every call: the port goes silent while the device stays enumerated and
+otherwise healthy. Register state on a wedged stock board, via J-Link:
 
-## 2a. Root cause: data-toggle desynchronisation
+    SIE_STATUS  = 0x00000015   (VBUS_DETECTED | LINE_STATE | SUSPENDED)
+    INTE        = 0x0001FBF0   (suspend and resume both enabled)
+    EP_TX_ERROR = 0, EP_RX_ERROR = 0, BUFF_STATUS = 0
 
-USB bulk endpoints use a DATA0/DATA1 toggle for duplicate detection. Device and
-host each track the expected PID independently and must stay in lockstep.
+No endpoint errors, no stalled transfers. Simply suspended, never resumed.
 
-`rpi_pico_prep_tx()` (and `prep_rx()`) advance the toggle when a transfer is
-**queued**, not when it **completes**:
+**Fixed** by handling suspend before resume so the later real event wins.
+Measured effect at 0.3 s pacing: died at 17 → 60 transactions with no failure.
 
-```c
-buf_ctrl |= ep_data->next_pid ? USB_BUF_CTRL_DATA1_PID : USB_BUF_CTRL_DATA0_PID;
-ep_data->next_pid ^= 1U;        /* udc_rpi_pico.c:451 — before the SIE has sent anything */
-```
+**Still failing.** At 1 s pacing it dies at 6 / 20 / 29 across runs. Something
+further remains; the same measurement method should be used to find it.
 
-That is harmless while transfers succeed. One corrupted packet breaks it
-permanently:
-
-1. Driver queues DATA0, immediately sets `next_pid` to DATA1.
-2. The packet is corrupted on the wire. The host never accepts it, so the
-   host's expected PID stays DATA0.
-3. The transfer is retried — but the driver now sends **DATA1**.
-4. The host is expecting DATA0, so DATA1 looks like a retransmission of a
-   packet it already accepted. Per spec it **discards the payload and ACKs**.
-5. The device sees the ACK and considers the transfer successful.
-
-The toggles are now permanently out of phase. Every subsequent packet is
-silently dropped by the host as a duplicate while the device believes it is
-transmitting normally. Only a device reset clears it, because reset is the only
-path that zeroes `next_pid` (`udc_rpi_pico.c:1241`, `:1354`).
-
-This accounts for every observation:
-
-| Observation | Explanation |
-|---|---|
-| One CRC error kills the endpoint permanently | Toggle desync is not self-correcting |
-| `crc` and `ep_tx_errors` track ~1:1 | Same event counted twice |
-| `BUFF_STATUS=0`, all threads idle, `tx_busy=0` | Device believes every transfer succeeded |
-| Host stops polling; bus goes silent | Host receives only duplicates |
-| Only a power cycle recovers | Reset is the only thing that clears `next_pid` |
-| Reopening the host port does not help | DTR does not reset the toggle |
-| Freeze position varies between runs | Depends on when the first CRC error lands |
-
-**Fix (patch 0002):** on `ENDPOINT_ERROR`, roll the toggle back
-(`rpi_pico_rollback_pid()`) for each endpoint named in
-`EP_TX_ERROR`/`EP_RX_ERROR` before requeueing, so the retry carries the PID the
-host is actually waiting for. Note `EP_RX_ERROR` has a dedicated **SEQ**
-(sequence-error) bit per endpoint — the hardware reports this condition
-explicitly, and the stock driver ignores it.
-
-## 3. Firmware defect found (real, and fixed)
+## 3. Secondary observation: ENDPOINT_ERROR is never handled (not the cause)
 
 `drivers/usb/udc/udc_rpi_pico.c` in Zephyr 4.3.0 — and still in `main` as of
 this writing:
@@ -131,9 +107,11 @@ The datasheet is explicit: *"An endpoint has encountered an error. Read the
 ep_rx_error and ep_tx_error registers to find out which endpoint had an
 error."* The driver does none of this.
 
-**This is upstream-reportable and affects every RP2350 USB device user.** It
-does not cause the link errors, but it is why a recoverable error becomes a
-permanent, silent hang.
+This is a genuine gap and arguably worth reporting upstream, but it is **not**
+the cause of this wedge: on pristine 4.3.0 the failure occurs with all
+endpoint-error registers reading zero. Attempts to act on `ENDPOINT_ERROR`
+(re-arm, toggle rollback, STALL-based resynchronisation) each made behaviour
+measurably worse and were reverted.
 
 ## 4. Hardware hypotheses eliminated
 

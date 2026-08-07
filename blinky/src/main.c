@@ -56,66 +56,13 @@
  */
 #define USB_DPRAM_BASE             0x50100000U
 #define USB_DPRAM_EP2_IN_BUF_CTRL  (USB_DPRAM_BASE + 0x90U)
+/* EP1 OUT buffer control: 0x80 + 1*8 + 4 (OUT is the second word). */
+#define USB_DPRAM_EP1_OUT_BUF_CTRL (USB_DPRAM_BASE + 0x8CU)
+/* Endpoint control for EP1 OUT: 0x08 + (1-1)*8 + 4. */
+#define USB_DPRAM_EP1_OUT_EP_CTRL  (USB_DPRAM_BASE + 0x0CU)
 
-/*
- * SIE error/lifecycle counters maintained by the patched udc_rpi_pico driver
- * (patches/zephyr/0002-...). Declared here rather than in a header because the
- * counters are a local diagnostic addition, not upstream API.
- */
-struct udc_rpi_pico_err_stats {
-	uint32_t crc;
-	uint32_t bit_stuff;
-	uint32_t data_seq;
-	uint32_t rx_timeout;
-	uint32_t rx_overflow;
-	uint32_t enable_calls;
-	uint32_t bus_resets;
-	uint32_t suspends;
-	uint32_t vbus_removed;
-	uint32_t ep_tx_errors;
-	uint32_t ep_rx_errors;
-	uint32_t last_ep_tx_error;
-	uint32_t last_ep_rx_error;
-	uint32_t reenumerations;
-	uint32_t ep_halts;
-	uint32_t ep_halt_clears;
-	uint8_t last_halted_ep;
-	uint8_t last_cleared_ep;
-};
 
-extern struct udc_rpi_pico_err_stats udc_rpi_pico_err_stats;
 
-/*
- * CDC-ACM TX-path diagnostic (patches/zephyr/0003-...). Reports bytes still
- * queued in the class driver's TX FIFO and whether it believes a transfer is
- * in flight -- the pair that distinguishes a stalled controller from a class
- * driver that has stopped submitting work.
- */
-extern int usbd_cdc_acm_tx_diag(const struct device *dev, uint32_t *pending,
-				bool *busy);
-
-/*
- * The USB device context created by CONFIG_CDC_ACM_SERIAL_INITIALIZE_AT_BOOT
- * (subsys/usb/device_next/app/cdc_acm_serial.c) is defined with
- * STRUCT_SECTION_ITERABLE, so it is reachable through the usbd_context linker
- * section rather than by symbol name. Needed to restart the stack from the
- * link watchdog below.
- */
-static struct usbd_context *usb_ctx_get(void)
-{
-	STRUCT_SECTION_FOREACH(usbd_context, ctx) {
-		return ctx;
-	}
-
-	return NULL;
-}
-
-/*
- * Consecutive 5 s monitor ticks with no USB error activity, after errors have
- * occurred, before the link is presumed dead. Three ticks (~15 s) is well past
- * any normal gap in shell traffic.
- */
-#define USB_WATCHDOG_QUIET_TICKS 3
 
 // Generated from ./VERSION by the build; see the Versioning section of the
 // top-level README. The version is logged at startup here and is also
@@ -180,76 +127,6 @@ static void wedge_report_thread(const struct k_thread *thread, void *user_data)
 	       (void *)thread->base.pended_on);
 }
 
-/*
- * USB link watchdog.
- *
- * The driver-level escalation (patch 0002) forces a re-enumeration while the
- * host is still polling a failing endpoint. It cannot help once the host gives
- * up: the bus goes silent, no more endpoint errors are raised, no interrupt
- * ever fires again, and the device sits enumerated-but-dead forever. That is
- * the state every wedge dump shows -- error counters frozen, BUFF_STATUS empty,
- * every thread idle.
- *
- * Detect it from outside the interrupt path: if the CDC-ACM shell has produced
- * no successful transfer for long enough, tear the whole USB stack down and
- * bring it back up. usbd_disable()/usbd_enable() rebuilds controller and class
- * state on this side and forces the host to re-enumerate, which is the only
- * thing that revives an abandoned link.
- */
-static void usb_link_watchdog(void)
-{
-	static uint32_t last_tx_evts;
-	static uint32_t last_crc;
-	static unsigned int quiet_ticks;
-	struct usbd_context *ctx;
-	int err;
-
-	uint32_t tx_evts = udc_rpi_pico_err_stats.ep_tx_errors;
-	uint32_t crc = udc_rpi_pico_err_stats.crc;
-
-	/*
-	 * "Quiet" means no endpoint errors AND no CRC errors since the last
-	 * check. A healthy idle link is also quiet, so this alone is not a
-	 * fault -- it only matters once errors have been seen, which is what
-	 * distinguishes an abandoned link from an unused one.
-	 */
-	if (tx_evts == last_tx_evts && crc == last_crc && tx_evts > 0) {
-		quiet_ticks++;
-	} else {
-		quiet_ticks = 0;
-	}
-
-	last_tx_evts = tx_evts;
-	last_crc = crc;
-
-	if (quiet_ticks < USB_WATCHDOG_QUIET_TICKS) {
-		return;
-	}
-
-	quiet_ticks = 0;
-	printk("  usb_watchdog: link dead after %u endpoint errors; restarting stack\n",
-	       tx_evts);
-
-	ctx = usb_ctx_get();
-	if (ctx == NULL) {
-		printk("  usb_watchdog: no usbd context\n");
-		return;
-	}
-
-	err = usbd_disable(ctx);
-	if (err) {
-		printk("  usb_watchdog: usbd_disable failed (%d)\n", err);
-		return;
-	}
-
-	k_msleep(100);
-
-	err = usbd_enable(ctx);
-	if (err) {
-		printk("  usb_watchdog: usbd_enable failed (%d)\n", err);
-	}
-}
-
 static void wedge_monitor(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -289,77 +166,12 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 		 * wedge: the SIE finished transfers and latched them, but no
 		 * interrupt can fire to collect them.
 		 */
-		printk("  usb INTE=%08x INTS=%08x BUFF_STATUS=%08x SIE_CTRL=%08x SIE_STATUS=%08x\n",
-		       sys_read32(USB_REG_INTE), sys_read32(USB_REG_INTS),
-		       sys_read32(USB_REG_BUFF_STATUS),
-		       sys_read32(USB_REG_SIE_CTRL), sys_read32(USB_REG_SIE_STATUS));
 
 		/*
 		 * SIE error counters. CRC and bit-stuff are generated by the USB
 		 * hardware and cannot be produced by firmware timing, so if these
 		 * climb before a wedge the cause is electrical, not code.
 		 */
-		printk("  usb_ep tx_err=%08x rx_err=%08x stall_nak=%08x abort=%08x abort_done=%08x\n",
-		       sys_read32(USB_REG_EP_TX_ERROR), sys_read32(USB_REG_EP_RX_ERROR),
-		       sys_read32(USB_REG_EP_STALL_NAK), sys_read32(USB_REG_EP_ABORT),
-		       sys_read32(USB_REG_EP_ABORT_DONE));
-
-		printk("  sie_err crc=%u bitstuff=%u dataseq=%u rxto=%u rxovf=%u\n",
-		       udc_rpi_pico_err_stats.crc,
-		       udc_rpi_pico_err_stats.bit_stuff,
-		       udc_rpi_pico_err_stats.data_seq,
-		       udc_rpi_pico_err_stats.rx_timeout,
-		       udc_rpi_pico_err_stats.rx_overflow);
-
-		printk("  ep_err tx_evts=%u rx_evts=%u last_tx=%08x last_rx=%08x reenum=%u\n",
-		       udc_rpi_pico_err_stats.ep_tx_errors,
-		       udc_rpi_pico_err_stats.ep_rx_errors,
-		       udc_rpi_pico_err_stats.last_ep_tx_error,
-		       udc_rpi_pico_err_stats.last_ep_rx_error,
-		       udc_rpi_pico_err_stats.reenumerations);
-
-		{
-			const struct device *cdc =
-				DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
-			uint32_t pending = 0;
-			bool busy = false;
-
-			if (usbd_cdc_acm_tx_diag(cdc, &pending, &busy) == 0) {
-				printk("  cdc_tx pending=%u class_busy=%d "
-				       "ep82_bufctrl=%08x\n",
-				       pending, (int)busy,
-				       sys_read32(USB_DPRAM_EP2_IN_BUF_CTRL));
-			}
-		}
-
-		printk("  ep_halt halts=%u (ep 0x%02x) host_clears=%u (ep 0x%02x)\n",
-		       udc_rpi_pico_err_stats.ep_halts,
-		       udc_rpi_pico_err_stats.last_halted_ep,
-		       udc_rpi_pico_err_stats.ep_halt_clears,
-		       udc_rpi_pico_err_stats.last_cleared_ep);
-
-		printk("  usb_life enable=%u resets=%u suspend=%u vbus_rm=%u\n",
-		       udc_rpi_pico_err_stats.enable_calls,
-		       udc_rpi_pico_err_stats.bus_resets,
-		       udc_rpi_pico_err_stats.suspends,
-		       udc_rpi_pico_err_stats.vbus_removed);
-
-		/*
-		 * DISABLED. Restarting the USB stack on a quiet link caused the
-		 * device to re-enumerate continuously: the host never completed
-		 * a session before the next restart, so the port kept dropping
-		 * and reappearing and could not be opened at all. A wedge that
-		 * can be power-cycled is better than a port that never settles.
-		 *
-		 * The detection heuristic is the flaw -- "errors seen, then no
-		 * change for 15 s" also matches a link that has simply gone
-		 * idle, so the watchdog fires on healthy quiet periods too.
-		 * Re-enable only with a positive liveness check (an actual
-		 * failed transfer outstanding), not an absence of activity.
-		 */
-		if (IS_ENABLED(CONFIG_BENTO_USB_LINK_WATCHDOG)) {
-			usb_link_watchdog();
-		}
 
 		/*
 		 * k_thread_foreach_unlocked() walks with interrupts enabled
