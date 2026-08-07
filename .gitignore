@@ -12,3 +12,4 @@
 build/
 /zephyrproject/
 build.usbtest/
+tests/usb_regression/src/host_main.c
