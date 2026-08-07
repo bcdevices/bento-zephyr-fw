@@ -26,6 +26,24 @@ writes a 0 and does nothing. Includes the BUFF_STATUS completion-dispatch loop,
 where the same mistake caused stale completions to be re-dispatched on every
 interrupt.
 
+`src/test_captured.c` -- register values captured on a wedged board, encoded
+so the decode is checked by the compiler rather than by hand. Covers SIE_STATUS
+in three real conditions (active bus, genuinely suspended, bus reset), buffer
+control for the bulk IN and OUT endpoints in armed/unarmed and held/idle
+states, the EP_TX_ERROR/EP_RX_ERROR bit layout and the SEQ-vs-TRANSACTION
+distinction that determines whether a toggle correction is justified, the CDC
+endpoint addresses, the pacing inversion that identified suspend as the
+trigger, SOF frame-counter arithmetic including wrap, the enumeration request
+log before and after the write-1-to-clear fix, and why the diagnostic counter
+struct must live in a shared header.
+
+Several of these encode mistakes that were actually made during the
+investigation: FULL and AVAILABLE were decoded backwards once, and an endpoint
+index was mapped to the wrong address, causing a fix to halt the notification
+endpoint (0x81) while trying to recover the bulk IN endpoint (0x82). The host
+cleared that halt ten times and the port stayed dead, which briefly looked like
+evidence against a correct theory.
+
 `src/test_state.c` -- state machines. Encodes each state-handling bug as an
 event sequence:
 
