@@ -1,8 +1,8 @@
 diff --git i/subsys/usb/device_next/usbd_core.c w/subsys/usb/device_next/usbd_core.c
-index 9f24530fc2c..1817a9d2dee 100644
+index 9f24530fc2c..38634457dd3 100644
 --- i/subsys/usb/device_next/usbd_core.c
 +++ w/subsys/usb/device_next/usbd_core.c
-@@ -59,13 +59,21 @@ static int event_handler_ep_request(struct usbd_context *const uds_ctx,
+@@ -59,15 +59,29 @@ static int event_handler_ep_request(struct usbd_context *const uds_ctx,
  	return ret;
  }
  
@@ -10,6 +10,9 @@ index 9f24530fc2c..1817a9d2dee 100644
 +uint32_t usbd_core_evt_res;
 +uint32_t usbd_core_bcast_blocked;
 +uint32_t usbd_core_ch9_state;
++uint32_t usbd_core_bcast_ok;
++uint32_t usbd_core_blocked_state;
++uint32_t usbd_core_blocked_type;
 +
  static void usbd_class_bcast_event(struct usbd_context *const uds_ctx,
  				   struct udc_event *const event)
@@ -21,10 +24,15 @@ index 9f24530fc2c..1817a9d2dee 100644
 +
  	if (!usbd_state_is_configured(uds_ctx)) {
 +		usbd_core_bcast_blocked++;
++		usbd_core_blocked_state = (uint32_t)uds_ctx->ch9_data.state;
++		usbd_core_blocked_type = (uint32_t)event->type;
  		return;
  	}
++	usbd_core_bcast_ok++;
  
-@@ -148,12 +156,14 @@ static ALWAYS_INLINE void usbd_event_handler(struct usbd_context *const uds_ctx,
+ 	cfg_nd = usbd_config_get_current(uds_ctx);
+ 	if (cfg_nd == NULL) {
+@@ -148,12 +162,14 @@ static ALWAYS_INLINE void usbd_event_handler(struct usbd_context *const uds_ctx,
  		usbd_msg_pub_simple(uds_ctx, USBD_MSG_VBUS_READY, 0);
  		break;
  	case UDC_EVT_SUSPEND:

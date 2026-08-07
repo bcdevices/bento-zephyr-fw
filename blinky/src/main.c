@@ -119,10 +119,17 @@ extern int usbd_cdc_acm_diag(const struct device *dev, uint32_t *tx_pending,
 extern uint32_t usbd_cdc_acm_susp_calls;
 extern uint32_t usbd_cdc_acm_res_calls;
 extern uint32_t usbd_cdc_acm_rxbusy_sets;
+extern uint32_t usbd_cdc_acm_rx_enq;
+extern uint32_t usbd_cdc_acm_rx_done;
+extern uint32_t usbd_cdc_acm_rx_err;
+extern uint32_t usbd_cdc_acm_last_req_err;
 extern uint32_t usbd_core_evt_susp;
 extern uint32_t usbd_core_evt_res;
 extern uint32_t usbd_core_bcast_blocked;
 extern uint32_t usbd_core_ch9_state;
+extern uint32_t usbd_core_bcast_ok;
+extern uint32_t usbd_core_blocked_state;
+extern uint32_t usbd_core_blocked_type;
 extern uint32_t usbd_ch9_setup_count;
 extern uint32_t usbd_ch9_last_req;
 extern uint32_t usbd_ch9_err_count;
@@ -180,9 +187,15 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       "cls_susp=%u cls_res=%u rxarm=%u\n",
 			       st, txp, rxp, usbd_cdc_acm_susp_calls,
 			       usbd_cdc_acm_res_calls, usbd_cdc_acm_rxbusy_sets);
-			printk("  core susp_evt=%u res_evt=%u blocked=%u ch9=%u\n",
+			printk("  rx enq=%u done=%u err=%u lasterr=%u\n",
+			       usbd_cdc_acm_rx_enq, usbd_cdc_acm_rx_done,
+			       usbd_cdc_acm_rx_err, usbd_cdc_acm_last_req_err);
+			printk("  core susp_evt=%u res_evt=%u blocked=%u ok=%u "
+			       "ch9=%u blk_state=%u blk_type=%u\n",
 			       usbd_core_evt_susp, usbd_core_evt_res,
-			       usbd_core_bcast_blocked, usbd_core_ch9_state);
+			       usbd_core_bcast_blocked, usbd_core_bcast_ok,
+			       usbd_core_ch9_state, usbd_core_blocked_state,
+			       usbd_core_blocked_type);
 			printk("  bus resets=%u setups=%u sie@reset=%08x "
 			       "addr@reset=%08x\n",
 			       udc_rpi_pico_susp_trace.bus_resets,
