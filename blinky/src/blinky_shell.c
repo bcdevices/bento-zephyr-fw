@@ -7,8 +7,9 @@
 /*
  * blinky_shell.c - Version reporting over the UART shell.
  *
- * The shell lives on the physical UART (zephyr,shell-uart = &uart1 in the
- * board DTS). Zephyr's built-in `kernel version` command reports the Zephyr
+ * The shell lives on a USB CDC-ACM port (zephyr,shell-uart = &cdc_acm_uart0
+ * in ./app.overlay). Zephyr's built-in `kernel version` command reports the
+ * Zephyr
  * kernel version, not the application's, so the app version from ./VERSION is
  * exposed here as a separate `version` command.
  */

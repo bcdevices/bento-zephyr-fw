@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..445fad16582 100644
+index b0fb2fcf44f..ffd76d7c124 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,64 @@
@@ -67,7 +67,117 @@ index b0fb2fcf44f..445fad16582 100644
  struct rpi_pico_config {
  	usb_hw_t *base;
  	usb_device_dpram_t *dpram;
-@@ -290,7 +348,7 @@ static int rpi_pico_prep_tx(const struct device *dev,
+@@ -69,8 +127,109 @@ struct rpi_pico_data {
+ 	struct rpi_pico_ep_data in_ep[USB_NUM_ENDPOINTS];
+ 	bool rwu_pending;
+ 	uint8_t setup[8];
++	/*
++	 * Consecutive suppressed line errors that left nothing latched in
++	 * buf_status. See the error handling in rpi_pico_isr_handler().
++	 */
++	uint8_t empty_err_count;
++	/*
++	 * Consecutive endpoint errors with no successful IN transfer in
++	 * between; drives the re-enumeration escalation.
++	 */
++	uint8_t ep_err_run;
++	/* Consecutive successful IN transfers; clears ep_err_run once the link
++	 * has demonstrably recovered.
++	 */
++	uint8_t ep_ok_run;
+ };
+ 
++/*
++ * Consecutive endpoint errors, with no successful transfer in between, before
++ * the driver forces a re-enumeration. Sized well above the handful of errors a
++ * transient glitch produces, so a link that recovers on its own never triggers
++ * it, but far below the point where the host gives up on the device.
++ */
++/*
++ * Deliberately low. The host does not keep retrying a failing endpoint
++ * indefinitely -- in practice it abandons the device after roughly a dozen
++ * failed transactions and the bus goes silent, at which point no further
++ * endpoint errors are generated and any higher threshold can never be reached.
++ * The escalation therefore has to trigger while the host is still talking.
++ */
++#define RPI_PICO_EP_ERR_REENUM_LIMIT 0
++
++/*
++ * Consecutive successful IN transfers required before the endpoint-error run is
++ * considered broken. Must be greater than 1: the re-arm on an endpoint error
++ * produces a completion of its own, so a threshold of 1 would clear the run on
++ * every failure and the escalation could never trigger.
++ */
++#define RPI_PICO_EP_OK_RUN_CLEAR 8
++
++/*
++ * Number of consecutive suppressed line errors with no completion behind them
++ * before a real error event is raised. Hub-artifact storms come with genuine
++ * completions latched in buf_status and so never reach this; a transfer truly
++ * lost on the wire produces an unbroken run and does.
++ */
++#define RPI_PICO_EMPTY_ERR_LIMIT 8
++
++/*
++ * SIE error and lifecycle counters.
++ *
++ * The ISR clears the line-error latches to keep a hub-artifact storm from
++ * flooding the usbd core, which also throws away the only per-type record of
++ * what the PHY is seeing. These counters keep that record.
++ *
++ * They exist to answer one question: when the USB endpoint wedges, is the
++ * physical layer degrading first? CRC and bit-stuff errors are produced by the
++ * SIE itself and cannot be caused by firmware timing, so a climbing crc /
++ * bit_stuff count before a wedge indicates an electrical problem (rail
++ * disturbance, missing CC termination, backpowering) that no firmware change
++ * can fix. Counts that stay at zero while the controller stops point the other
++ * way -- at firmware or controller state.
++ *
++ * enable_calls / bus_resets track whether udc_rpi_pico_enable() re-runs: it
++ * memset()s the whole register block (clearing INTE), so a second call that
++ * does not complete leaves interrupts permanently disabled with completions
++ * stranded in BUFF_STATUS.
++ *
++ * Deliberately a plain global, not per-instance: it must be readable from
++ * application code (a diagnostic thread) without a device handle, and there is
++ * exactly one USB device controller on this SoC.
++ */
++struct udc_rpi_pico_err_stats {
++	uint32_t crc;
++	uint32_t bit_stuff;
++	uint32_t data_seq;
++	uint32_t rx_timeout;
++	uint32_t rx_overflow;
++	uint32_t enable_calls;
++	uint32_t bus_resets;
++	uint32_t suspends;
++	uint32_t vbus_removed;
++	/* Endpoint-level errors, and the raw register value most recently seen
++	 * (2 bits per endpoint, EP n at bits 2n+1:2n).
++	 */
++	uint32_t ep_tx_errors;
++	uint32_t ep_rx_errors;
++	uint32_t last_ep_tx_error;
++	uint32_t last_ep_rx_error;
++	/* Forced re-enumerations after unrecoverable endpoint errors. */
++	uint32_t reenumerations;
++	/* Endpoints halted after a controller error, and host CLEAR_FEATURE
++	 * responses that cleared them. If halts climb but clears stay at zero,
++	 * the host is not performing the standard resynchronisation.
++	 */
++	uint32_t ep_halts;
++	uint32_t ep_halt_clears;
++	/* Address of the most recently halted / cleared endpoint. */
++	uint8_t last_halted_ep;
++	uint8_t last_cleared_ep;
++};
++
++struct udc_rpi_pico_err_stats udc_rpi_pico_err_stats;
++
+ static inline int udc_ep_to_bnum(const uint8_t ep)
+ {
+ 	if (USB_EP_DIR_IS_IN(ep)) {
+@@ -290,7 +449,7 @@ static int rpi_pico_prep_tx(const struct device *dev,
  	lock_key = irq_lock();
  
  	len = MIN(cfg->mps, buf->len);
@@ -76,7 +186,87 @@ index b0fb2fcf44f..445fad16582 100644
  
  	LOG_DBG("Prepare TX ep 0x%02x len %u pid: %u",
  		cfg->addr, len, ep_data->next_pid);
-@@ -627,7 +685,9 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
+@@ -465,6 +624,55 @@ static int rpi_pico_handle_evt_din(const struct device *dev,
+ 	return udc_submit_ep_event(dev, buf, 0);
+ }
+ 
++/*
++ * Halt an endpoint the controller has reported as broken, so that the host
++ * resynchronises it through the standard USB mechanism.
++ *
++ * Background: prep_tx()/prep_rx() advance the DATA0/DATA1 toggle when a
++ * transfer is *queued*, not when it completes. A packet lost to a CRC error
++ * therefore leaves the device one toggle ahead of the host. Every subsequent
++ * packet then looks to the host like a retransmission of one it has already
++ * accepted, so it discards the payload and ACKs -- the device sees ACKs and
++ * believes all is well while no data reaches the host. Only something that
++ * resets next_pid recovers, and the only paths that do are device reset and
++ * udc_rpi_pico_ep_clear_halt().
++ *
++ * The host will not initiate that recovery on its own: from its side nothing
++ * looks wrong, because duplicate-PID packets are a normal, silently-discarded
++ * occurrence. The desynchronisation is invisible to the only party able to
++ * clear it.
++ *
++ * Halting the endpoint makes it visible. A STALL handshake obliges the host to
++ * issue CLEAR_FEATURE(ENDPOINT_HALT), which lands in ep_clear_halt() and resets
++ * next_pid to 0 on this side while the host resets its own -- both ends
++ * deterministically back in step, by protocol.
++ *
++ * Deliberately no toggle arithmetic here. An earlier attempt rolled next_pid
++ * back directly on error and made things worse (endpoint error rate ~5/s ->
++ * ~8/s, with new SEQ and DATA_SEQ errors): EP_TX_ERROR is a saturating count,
++ * not a per-attempt flag, so it cannot distinguish a packet the host never
++ * received from one it received and ACKed with only the handshake corrupted.
++ * Guessing wrong desynchronises further. Handing the problem to the host's
++ * clear-halt path avoids having to guess at all.
++ */
++/*
++ * NOTE: endpoint STALL as a resynchronisation mechanism was tried here and
++ * REVERTED. Recording the result so it is not attempted again.
++ *
++ * The idea: udc_rpi_pico_ep_clear_halt() is the only non-reset path that resets
++ * next_pid, so halting a desynchronised endpoint should oblige the host to send
++ * CLEAR_FEATURE(ENDPOINT_HALT) and resynchronise both ends by protocol.
++ *
++ * Measured on target: the handshake worked exactly as intended -- the host
++ * issued ten CLEAR_FEATUREs against the halted endpoint -- and the interface
++ * stayed dead throughout. A data-toggle desynchronisation would have been
++ * repaired by the first one. The wedge therefore is NOT a toggle desync.
++ *
++ * The same run also recorded crc=4 / ep_tx_errors=2, against 133 / 119 in
++ * earlier wedged runs, so the failure is not a function of bus error rate
++ * either.
++ */
++
+ static void rpi_pico_handle_xfer_next(const struct device *dev,
+ 				      struct udc_ep_config *const cfg)
+ {
+@@ -593,6 +801,23 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+ 		return;
+ 	}
+ 
++	/*
++	 * Count consecutive good IN transfers. The error run is only cleared
++	 * once the link has strung several together.
++	 *
++	 * Resetting on a single completion is not enough: the endpoint re-arm
++	 * performed on an endpoint error itself produces a completion, which
++	 * would clear the run every time and make the escalation below
++	 * unreachable (observed as an endpoint erroring 65 times with the
++	 * re-enumeration never firing). A link that is genuinely working
++	 * produces an uninterrupted stream of completions, so requiring a few
++	 * in a row distinguishes recovery from a failure that merely bounced.
++	 */
++	if (++priv->ep_ok_run >= RPI_PICO_EP_OK_RUN_CLEAR) {
++		priv->ep_ok_run = RPI_PICO_EP_OK_RUN_CLEAR;
++		priv->ep_err_run = 0;
++	}
++
+ 	len = read_buf_ctrl_reg(dev, ep) & USB_BUF_CTRL_LEN_MASK;
+ 	net_buf_pull(buf, len);
+ 
+@@ -627,7 +852,9 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
  	}
  
  	len = read_buf_ctrl_reg(dev, ep) & USB_BUF_CTRL_LEN_MASK;
@@ -87,7 +277,7 @@ index b0fb2fcf44f..445fad16582 100644
  
  	if (net_buf_tailroom(buf) && len == udc_mps_ep_size(ep_cfg)) {
  		__unused int err;
-@@ -676,6 +736,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -676,6 +903,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  	usb_hw_t *base = config->base;
  	uint32_t status = base->ints;
  	uint32_t handled = 0;
@@ -95,7 +285,27 @@ index b0fb2fcf44f..445fad16582 100644
  
  	if (status & USB_INTS_DEV_SOF_BITS) {
  		handled |= USB_INTS_DEV_SOF_BITS;
-@@ -753,47 +814,57 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -693,6 +921,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		if (pcfg != NULL && !(sie_status & USB_SIE_STATUS_CONNECTED_BITS) &&
+ 		    !(sie_status & USB_SIE_STATUS_VBUS_DETECTED_BITS)) {
+ 			sie_dp_pullup(dev, false);
++			udc_rpi_pico_err_stats.vbus_removed++;
+ 			udc_submit_event(dev, UDC_EVT_VBUS_REMOVED, 0);
+ 		}
+ 
+@@ -742,6 +971,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		sie_status_clr(dev, USB_SIE_STATUS_SUSPENDED_BITS);
+ 
+ 		udc_set_suspended(dev, true);
++		udc_rpi_pico_err_stats.suspends++;
+ 		udc_submit_event(dev, UDC_EVT_SUSPEND, 0);
+ 	}
+ 
+@@ -750,50 +980,282 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
+ 
+ 		sys_write32(0, (mm_reg_t)&base->dev_addr_ctrl);
++		udc_rpi_pico_err_stats.bus_resets++;
  		udc_submit_event(dev, UDC_EVT_RESET, 0);
  	}
  
@@ -129,12 +339,14 @@ index b0fb2fcf44f..445fad16582 100644
 -		 * anyway.
 -		 */
 -		LOG_WRN("Data Sequence Error");
++		udc_rpi_pico_err_stats.data_seq++;
 +		error_seen = true;
  	}
  
  	if (status & USB_INTS_ERROR_RX_TIMEOUT_BITS) {
  		handled |= USB_INTS_ERROR_RX_TIMEOUT_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_RX_TIMEOUT_BITS);
++		udc_rpi_pico_err_stats.rx_timeout++;
 +		error_seen = true;
 +	}
  
@@ -143,13 +355,208 @@ index b0fb2fcf44f..445fad16582 100644
 +	if (status & USB_INTS_ERROR_BIT_STUFF_BITS) {
 +		handled |= USB_INTS_ERROR_BIT_STUFF_BITS;
 +		sie_status_clr(dev, USB_SIE_STATUS_BIT_STUFF_ERROR_BITS);
++		udc_rpi_pico_err_stats.bit_stuff++;
 +		error_seen = true;
 +	}
 +
 +	if (status & USB_INTS_ERROR_CRC_BITS) {
 +		handled |= USB_INTS_ERROR_CRC_BITS;
 +		sie_status_clr(dev, USB_SIE_STATUS_CRC_ERROR_BITS);
++		udc_rpi_pico_err_stats.crc++;
 +		error_seen = true;
++	}
++
++	/*
++	 * Endpoint-level errors.
++	 *
++	 * SIE_STATUS.ENDPOINT_ERROR reports that an endpoint's transmit or
++	 * receive path failed; EP_TX_ERROR / EP_RX_ERROR hold a saturating
++	 * 2-bit error count per endpoint. The stock driver enables neither the
++	 * interrupt nor reads these registers, so a failing data endpoint is
++	 * never noticed: the SIE stops servicing it, the class driver's
++	 * transfer never completes, no completion interrupt is raised, and
++	 * every thread goes idle believing its work is done. Output stops
++	 * permanently with no error anywhere in software.
++	 *
++	 * Clear the latches (all write-clear) so the counters stay meaningful,
++	 * record what happened, and surface a single error event so the usbd
++	 * core and class drivers can reset their state rather than waiting
++	 * forever on a transfer the hardware has already abandoned.
++	 */
++	/*
++	 * Re-read the error registers rather than relying solely on the `status`
++	 * snapshot taken at ISR entry: an endpoint error asserted after that read
++	 * would otherwise be missed here and, because INTS.ENDPOINT_ERROR is
++	 * sourced from the (now still-set) SIE_STATUS latch, would not
++	 * necessarily raise a fresh interrupt either. Checking the counters
++	 * directly makes the handler edge-independent.
++	 */
++	if ((status & USB_INTS_ENDPOINT_ERROR_BITS) ||
++	    sys_read32((mm_reg_t)&base->ep_tx_error) ||
++	    sys_read32((mm_reg_t)&base->ep_rx_error)) {
++		uint32_t tx_err = sys_read32((mm_reg_t)&base->ep_tx_error);
++		uint32_t rx_err = sys_read32((mm_reg_t)&base->ep_rx_error);
++
++		handled |= (status & USB_INTS_ENDPOINT_ERROR_BITS);
++
++		/* Write-1-to-clear: writing the value read resets those counts. */
++		if (tx_err) {
++			sys_write32(tx_err, (mm_reg_t)&base->ep_tx_error);
++			udc_rpi_pico_err_stats.ep_tx_errors++;
++			udc_rpi_pico_err_stats.last_ep_tx_error = tx_err;
++		}
++
++		if (rx_err) {
++			sys_write32(rx_err, (mm_reg_t)&base->ep_rx_error);
++			udc_rpi_pico_err_stats.ep_rx_errors++;
++			udc_rpi_pico_err_stats.last_ep_rx_error = rx_err;
++		}
++
++		sie_status_clr(dev, USB_SIE_STATUS_ENDPOINT_ERROR_BITS);
++
++		LOG_ERR("Endpoint error: tx 0x%08x rx 0x%08x", tx_err, rx_err);
++
++		/*
++		 * Escalation: force re-enumeration when per-endpoint recovery
++		 * stops making progress.
++		 *
++		 * Re-arming the endpoint (below) is the right first response,
++		 * but it cannot help when the transactions themselves keep
++		 * failing on the wire: the endpoint is restarted, the next
++		 * transfer fails identically, and the loop runs until the host
++		 * stops polling the device altogether. At that point the link is
++		 * dead and nothing in the device will ever revive it -- observed
++		 * as a wedged shell with the SIE error counters frozen and the
++		 * bus silent.
++		 *
++		 * Dropping the D+ pullup makes the host see a disconnect; the
++		 * host then re-enumerates from scratch, which rebuilds the
++		 * endpoint state on both sides. This does not repair whatever is
++		 * corrupting the transfers, but it turns a permanent wedge into
++		 * a recoverable interruption.
++		 */
++		priv->ep_ok_run = 0;
++
++		/*
++		 * Escalation disabled (limit 0 == off).
++		 *
++		 * Forcing a re-enumeration on a persistently failing endpoint
++		 * made things worse in practice: with errors arriving in the
++		 * dozens per session the device disconnected itself repeatedly,
++		 * so the host could never finish enumerating and the port
++		 * churned continuously instead of settling. The endpoint re-arm
++		 * below is retained -- it is bounded and does not disturb the
++		 * connection -- but tearing down the link is too blunt a
++		 * response to an error rate this high.
++		 */
++		if (RPI_PICO_EP_ERR_REENUM_LIMIT != 0 &&
++		    ++priv->ep_err_run >= RPI_PICO_EP_ERR_REENUM_LIMIT) {
++			priv->ep_err_run = 0;
++			udc_rpi_pico_err_stats.reenumerations++;
++			LOG_ERR("Endpoint error persists; forcing re-enumeration");
++
++			sie_dp_pullup(dev, false);
++			/*
++			 * The host needs to see SE0 for longer than its
++			 * disconnect-detect time (~2.5 us minimum; use a wide
++			 * margin). This runs in ISR context, so it must be a
++			 * busy-wait rather than a sleep -- it is bounded and
++			 * only happens on a link that is already broken.
++			 */
++			k_busy_wait(20000);
++			sie_dp_pullup(dev, true);
++		}
++
++		/*
++		 * Clearing the latches reports the failure but does not restart
++		 * the endpoint: the SIE has abandoned the transfer, so its
++		 * buffer-available bit stays clear, no completion is ever
++		 * raised, and the endpoint's busy flag stays set forever. The
++		 * class driver then waits on a transfer that can never finish.
++		 *
++		 * Re-arm every endpoint the hardware flagged. EP_TX_ERROR /
++		 * EP_RX_ERROR pack a 2-bit count per endpoint, EP n occupying
++		 * bits 2n+1:2n, so a non-zero field identifies the endpoint
++		 * directly. Cancel the stale hardware transfer (which also
++		 * clears the busy flag), then requeue whatever is still at the
++		 * head of that endpoint's queue.
++		 */
++		for (unsigned int i = 0; i < USB_NUM_ENDPOINTS; i++) {
++			const uint32_t field = BIT(2 * i) | BIT(2 * i + 1);
++
++			if (i == 0) {
++				/* EP0 has its own error handling in ch9. */
++				continue;
++			}
++
++			/*
++			 * TX (IN) errors are recorded but NOT retried here.
++			 *
++			 * EP_TX_ERROR reports TRANSACTION, not SEQ: the
++			 * hardware is not claiming a PID mismatch, and a failed
++			 * IN transaction carries no information about whether
++			 * the host received and ACKed the data. Nothing in
++			 * device-side state can distinguish the two, so any
++			 * retry is a guess.
++			 *
++			 * Both guesses were measured and both made things
++			 * worse. Rolling the toggle back raised the error rate
++			 * from ~5/s to ~8/s and introduced fresh SEQ errors.
++			 * Re-preparing the head-of-queue buffer runs
++			 * prep_tx() again -- which advances next_pid on every
++			 * call -- so an 82-deep retry loop simply walked the
++			 * toggle further out of step.
++			 *
++			 * Contrast the OUT path below, where the dedicated SEQ
++			 * bit states unambiguously that the toggle is wrong and
++			 * the correction is determinate. Diagnosing the IN path
++			 * needs the host's view (a protocol analyser or usbmon
++			 * capture), not more device-side inference.
++			 */
++
++			if (rx_err & field) {
++				uint8_t ep = USB_EP_DIR_OUT | i;
++				struct udc_ep_config *cfg = udc_get_ep_cfg(dev, ep);
++
++				if (cfg != NULL && cfg->stat.enabled) {
++					/*
++					 * A SEQ error means the host sent a PID
++					 * we were not armed for: our toggle is
++					 * wrong. prep_rx() advances next_pid
++					 * every time it arms the endpoint, so
++					 * simply re-arming here would keep
++					 * re-applying the same wrong value and
++					 * advancing past it -- the recovery
++					 * loop then sustains the desync it is
++					 * meant to clear (observed: 38 SEQ
++					 * errors, no recovery).
++					 *
++					 * Undo that advance so the re-arm uses
++					 * the PID the host is actually sending.
++					 * Only done for SEQ, where the hardware
++					 * states unambiguously that the toggle
++					 * is wrong; TRANSACTION errors carry no
++					 * such implication.
++					 */
++					if (rx_err & BIT(2 * i + 1)) {
++						get_ep_data(dev, ep)->next_pid ^= 1U;
++					}
++
++					rpi_pico_ep_cancel(dev, ep);
++					rpi_pico_handle_xfer_next(dev, cfg);
++				}
++			}
++		}
++
++		/*
++		 * Re-check buffer status: a transfer may have completed in the
++		 * same window, and its BUFF_STATUS interrupt can be lost to the
++		 * shared handshake-status latch (see the line-error handling
++		 * above). Without this the completion is stranded.
++		 */
++		error_seen = true;
++
++		udc_submit_event(dev, UDC_EVT_ERROR, -EIO);
  	}
  
  	if (status & USB_INTS_ERROR_RX_OVERFLOW_BITS) {
@@ -160,25 +567,46 @@ index b0fb2fcf44f..445fad16582 100644
  		LOG_ERR("RX overflow");
 -		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
 -	}
--
++		udc_rpi_pico_err_stats.rx_overflow++;
++		error_seen = true;
+ 
 -	if (status & USB_INTS_ERROR_BIT_STUFF_BITS) {
 -		handled |= USB_INTS_ERROR_BIT_STUFF_BITS;
 -		sie_status_clr(dev, USB_SIE_STATUS_BIT_STUFF_ERROR_BITS);
--
++		/*
++		 * An overrun leaves the OUT endpoint's AVAILABLE bit clear with
++		 * nothing to re-prime it, so the device silently stops accepting
++		 * host data from this point on -- the host keeps sending and
++		 * every packet is dropped.
++		 *
++		 * Unlike an IN transaction failure, this is unambiguous: the
++		 * endpoint needs re-arming and no guess about host state is
++		 * involved. Re-prime every enabled OUT endpoint that still has a
++		 * buffer queued.
++		 */
++		for (unsigned int i = 1; i < USB_NUM_ENDPOINTS; i++) {
++			uint8_t ep = USB_EP_DIR_OUT | i;
++			struct udc_ep_config *ep_cfg = udc_get_ep_cfg(dev, ep);
+ 
 -		LOG_ERR("Bit Stuff Error");
 -		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
 -	}
--
++			if (ep_cfg != NULL && ep_cfg->stat.enabled &&
++			    !ep_cfg->stat.halted) {
++				udc_ep_set_busy(ep_cfg, false);
++				rpi_pico_handle_xfer_next(dev, ep_cfg);
++			}
++		}
+ 
 -	if (status & USB_INTS_ERROR_CRC_BITS) {
 -		handled |= USB_INTS_ERROR_CRC_BITS;
 -		sie_status_clr(dev, USB_SIE_STATUS_CRC_ERROR_BITS);
 -
 -		LOG_ERR("CRC Error");
-+		error_seen = true;
  		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
  	}
  
-@@ -802,9 +873,16 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -802,10 +1264,45 @@ static void rpi_pico_isr_handler(const struct device *dev)
  	 * the same time, e.g. because of the interrupt latency. Check
  	 * BUF_STATUS interrupt first to get the notifications in the right
  	 * order.
@@ -193,11 +621,67 @@ index b0fb2fcf44f..445fad16582 100644
 -	if (status & USB_INTS_BUFF_STATUS_BITS) {
 -		handled |= USB_INTS_BUFF_STATUS_BITS;
 +	if ((status & USB_INTS_BUFF_STATUS_BITS) || error_seen) {
++		uint32_t buf_status_before = sys_read32((mm_reg_t)&base->buf_status);
++
 +		handled |= (status & USB_INTS_BUFF_STATUS_BITS);
  		rpi_pico_handle_buff_status(dev);
++
++		/*
++		 * Suppressing the benign line errors above removed the only path
++		 * that used to un-stick a wedged class driver: the stock driver
++		 * raised UDC_EVT_ERROR for each one, and the CDC-ACM class clears
++		 * its TX-busy flag on an error event. When the re-check found a
++		 * latched completion that is fine -- the transfer really did
++		 * finish. But if an error fires with nothing latched in
++		 * buf_status, a transfer was genuinely lost on the wire and no
++		 * completion is ever coming; staying silent there leaves the class
++		 * driver's single-outstanding-transfer flag set forever.
++		 *
++		 * Escalate only that case, and only after a run of consecutive
++		 * empty errors, so ordinary hub-artifact storms (which do have
++		 * completions behind them) stay suppressed and cannot flood the
++		 * usbd core thread.
++		 */
++		if (error_seen && buf_status_before == 0) {
++			priv->empty_err_count++;
++			if (priv->empty_err_count >= RPI_PICO_EMPTY_ERR_LIMIT) {
++				priv->empty_err_count = 0;
++				udc_submit_event(dev, UDC_EVT_ERROR, -EIO);
++			}
++		} else {
++			priv->empty_err_count = 0;
++		}
  	}
  
-@@ -1063,7 +1141,14 @@ static int udc_rpi_pico_enable(const struct device *dev)
+ 	if (status & USB_INTS_SETUP_REQ_BITS) {
+@@ -980,6 +1477,12 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
+ 
+ 	ep_data->next_pid = 0;
+ 	cfg->stat.halted = false;
++	/* Counted here, past the EP0 early-return, so it reflects only real
++	 * bulk/interrupt endpoint resynchronisations rather than the control
++	 * endpoint clears that occur routinely during enumeration.
++	 */
++	udc_rpi_pico_err_stats.ep_halt_clears++;
++	udc_rpi_pico_err_stats.last_cleared_ep = cfg->addr;
+ 	irq_unlock(lock_key);
+ 
+ 	if (udc_ep_is_busy(cfg)) {
+@@ -1028,6 +1531,13 @@ static int udc_rpi_pico_enable(const struct device *dev)
+ 	usb_hw_t *base = config->base;
+ 	int ret;
+ 
++	/*
++	 * Counted before anything is touched: the memset() below clears the
++	 * entire register block including INTE, so a second call that fails to
++	 * run to completion leaves USB interrupts off for good.
++	 */
++	udc_rpi_pico_err_stats.enable_calls++;
++
+ 	/* Reset USB controller */
+ 	ret = reset_line_toggle_dt(&config->reset);
+ 	if (ret) {
+@@ -1063,7 +1573,14 @@ static int udc_rpi_pico_enable(const struct device *dev)
  	/* Enable an interrupt per EP0 transaction */
  	sys_write32(USB_SIE_CTRL_EP0_INT_1BUF_BITS, (mm_reg_t)&base->sie_ctrl);
  
@@ -213,3 +697,17 @@ index b0fb2fcf44f..445fad16582 100644
  	sys_write32(IF_ENABLED(CONFIG_UDC_ENABLE_SOF, (USB_INTE_DEV_SOF_BITS |))
  		    USB_INTE_SETUP_REQ_BITS |
  		    USB_INTE_DEV_RESUME_FROM_HOST_BITS |
+@@ -1076,6 +1593,13 @@ static int udc_rpi_pico_enable(const struct device *dev)
+ 		    USB_INTE_ERROR_RX_OVERFLOW_BITS |
+ 		    USB_INTE_ERROR_RX_TIMEOUT_BITS |
+ 		    USB_INTE_ERROR_DATA_SEQ_BITS |
++		    /*
++		     * Endpoint-level errors are not enabled by the stock driver,
++		     * which is why a failing data endpoint goes unnoticed until
++		     * the link is silently dead. See the ENDPOINT_ERROR handling
++		     * in rpi_pico_isr_handler().
++		     */
++		    USB_INTE_ENDPOINT_ERROR_BITS |
+ 		    USB_INTE_BUFF_STATUS_BITS,
+ 		    (mm_reg_t)&base->inte);
+ 

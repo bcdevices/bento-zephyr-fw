@@ -3,7 +3,13 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * Define a USB CDC-ACM serial port and route the interactive shell to it.
+ * Define a USB CDC-ACM serial port and route the interactive shell to it,
+ * mirroring app/app.overlay so blinky can be used as the lighter-weight
+ * vehicle for exercising the USB shell.
+ *
+ * The filename matters: Zephyr auto-applies `app.overlay` from the
+ * application source directory. A differently-named overlay is silently
+ * ignored, which would leave the shell on the UART with a clean build.
  *
  * The console (zephyr,console) deliberately stays on the physical UART
  * (&uart1, GP4/GP5 = RP_TX1/RP_RX1, in the board DTS): keeping boot banners,

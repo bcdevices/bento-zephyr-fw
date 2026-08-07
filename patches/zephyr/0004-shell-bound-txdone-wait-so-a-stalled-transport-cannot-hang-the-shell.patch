@@ -1,0 +1,104 @@
+diff --git i/subsys/shell/Kconfig w/subsys/shell/Kconfig
+index c35b0193f6b..7d333a1b998 100644
+--- i/subsys/shell/Kconfig
++++ w/subsys/shell/Kconfig
+@@ -94,6 +94,25 @@ config SHELL_PRINTF_BUFF_SIZE
+ 	  It is working like stdio buffering in Linux systems
+ 	  to limit number of peripheral access calls.
+ 
++config SHELL_TXDONE_TIMEOUT_MS
++	int "Shell TX-done wait timeout (ms)"
++	default 250
++	help
++	  How long z_shell_write() waits for the transport to signal that it can
++	  accept more output before giving up on the rest of the current write.
++
++	  Upstream waits forever, which deadlocks the shell thread if the
++	  transport stops completing transfers (for example a USB endpoint the
++	  controller has abandoned). Since the shell's state machine is driven
++	  from its TX path, that also stops it reading input, so the console
++	  becomes completely unresponsive until the device is reset.
++
++	  With a timeout the shell drops the remainder of that write, returns to
++	  the prompt and keeps running. Output is truncated; the session
++	  survives. Set high enough that a merely slow transport is never cut
++	  off -- a healthy backend completes in microseconds to low
++	  milliseconds.
++
+ config SHELL_PRINTF_AUTOFLUSH
+ 	bool "Indicate if the buffer should be automatically flushed"
+ 	default y
+diff --git i/subsys/shell/shell_ops.c w/subsys/shell/shell_ops.c
+index 37715b7ec0e..e17aea59eb7 100644
+--- i/subsys/shell/shell_ops.c
++++ w/subsys/shell/shell_ops.c
+@@ -428,18 +428,44 @@ void z_shell_print_prompt_and_cmd(const struct shell *sh)
+ 	}
+ }
+ 
+-static void shell_pend_on_txdone(const struct shell *sh)
++/*
++ * Wait for the transport to report that it can accept more output.
++ *
++ * Returns 0 when TXDONE arrived, -EAGAIN if the wait timed out.
++ *
++ * The timeout is the important part. Upstream waits K_FOREVER, which assumes
++ * the transport always eventually completes a transfer. When it does not --
++ * a USB endpoint the controller has abandoned, a backend whose completion
++ * interrupt stops arriving -- the shell thread parks here permanently. Because
++ * the shell's state machine is pumped from its TX path (shell_uart.c's
++ * uart_tx_handle() raises SHELL_TRANSPORT_EVT_TX_RDY), that also stops it
++ * servicing input, so a single stalled write kills the whole session: no
++ * output, no echo, no prompt, recoverable only by resetting the board.
++ *
++ * A bounded wait turns that into lost output. The caller abandons the rest of
++ * the current write and returns to the prompt, which is the right failure mode
++ * for an interactive shell: a command that prints half its output is a nuisance,
++ * a console that never responds again is not usable at all.
++ */
++static int shell_pend_on_txdone(const struct shell *sh)
+ {
+ 	if (IS_ENABLED(CONFIG_MULTITHREADING) &&
+ 	    (sh->ctx->state < SHELL_STATE_PANIC_MODE_ACTIVE)) {
+-		k_event_wait(&sh->ctx->signal_event, SHELL_SIGNAL_TXDONE, false, K_FOREVER);
++		uint32_t events;
++
++		events = k_event_wait(&sh->ctx->signal_event, SHELL_SIGNAL_TXDONE,
++				      false, K_MSEC(CONFIG_SHELL_TXDONE_TIMEOUT_MS));
+ 		k_event_clear(&sh->ctx->signal_event, SHELL_SIGNAL_TXDONE);
+-	} else {
+-		/* Blocking wait in case of bare metal. */
+-		while (!z_flag_tx_rdy_get(sh)) {
+-		}
+-		z_flag_tx_rdy_set(sh, false);
++
++		return (events & SHELL_SIGNAL_TXDONE) ? 0 : -EAGAIN;
+ 	}
++
++	/* Blocking wait in case of bare metal. */
++	while (!z_flag_tx_rdy_get(sh)) {
++	}
++	z_flag_tx_rdy_set(sh, false);
++
++	return 0;
+ }
+ 
+ void z_shell_write(const struct shell *sh, const void *data,
+@@ -461,7 +487,16 @@ void z_shell_write(const struct shell *sh, const void *data,
+ 		length -= tmp_cnt;
+ 		if (tmp_cnt == 0 &&
+ 		    (sh->ctx->state != SHELL_STATE_PANIC_MODE_ACTIVE)) {
+-			shell_pend_on_txdone(sh);
++			if (shell_pend_on_txdone(sh) != 0) {
++				/*
++				 * The transport has stopped accepting data.
++				 * Drop the remainder of this write rather than
++				 * blocking the shell thread indefinitely: the
++				 * session stays alive and the prompt comes
++				 * back, at the cost of truncated output.
++				 */
++				break;
++			}
+ 		}
+ 	}
+ }
