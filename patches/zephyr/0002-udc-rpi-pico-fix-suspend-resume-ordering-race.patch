@@ -1,8 +1,8 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..632045540f2 100644
+index b0fb2fcf44f..4e09031cd3f 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
-@@ -23,6 +23,17 @@
+@@ -23,6 +23,24 @@
  #include <zephyr/logging/log.h>
  LOG_MODULE_REGISTER(udc_rpi_pico, CONFIG_UDC_DRIVER_LOG_LEVEL);
  
@@ -13,6 +13,13 @@ index b0fb2fcf44f..632045540f2 100644
 + */
 +#define RPI_PICO_SUSPEND_IDLE_MS 5
 +
++/*
++ * Upper bound on the EP_ABORT handshake busy-wait. The handshake normally
++ * completes within a few bus cycles; this only exists so a stuck endpoint
++ * cannot hang the ISR indefinitely.
++ */
++#define RPI_PICO_ABORT_SPIN_LIMIT 10000
++
 +#include <zephyr/drivers/usb/udc_rpi_pico_trace.h>
 +
 +struct udc_rpi_pico_susp_trace udc_rpi_pico_susp_trace;
@@ -20,7 +27,7 @@ index b0fb2fcf44f..632045540f2 100644
  struct rpi_pico_config {
  	usb_hw_t *base;
  	usb_device_dpram_t *dpram;
-@@ -68,6 +79,8 @@ struct rpi_pico_data {
+@@ -68,6 +86,8 @@ struct rpi_pico_data {
  	struct rpi_pico_ep_data out_ep[USB_NUM_ENDPOINTS];
  	struct rpi_pico_ep_data in_ep[USB_NUM_ENDPOINTS];
  	bool rwu_pending;
@@ -29,7 +36,7 @@ index b0fb2fcf44f..632045540f2 100644
  	uint8_t setup[8];
  };
  
-@@ -126,7 +139,28 @@ static void ALWAYS_INLINE sie_status_clr(const struct device *dev, const uint32_
+@@ -126,7 +146,28 @@ static void ALWAYS_INLINE sie_status_clr(const struct device *dev, const uint32_
  	const struct rpi_pico_config *config = dev->config;
  	usb_hw_t *base = config->base;
  
@@ -59,7 +66,80 @@ index b0fb2fcf44f..632045540f2 100644
  }
  
  static inline uint32_t get_ep_mask(const uint8_t ep)
-@@ -716,16 +750,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -220,9 +261,36 @@ static void rpi_pico_ep_cancel(const struct device *dev, const uint8_t ep)
+ 	}
+ 
+ 	if (abort_handshake_supported) {
++		unsigned int spins = 0;
++
++		/*
++		 * EP_ABORT_DONE is write-1-to-clear and this driver never
++		 * acknowledged it, so its bits accumulated permanently. After
++		 * the first abort of an endpoint the wait below exited
++		 * immediately on a stale done bit, defeating the handshake and
++		 * allowing buf_ctrl to be modified while the SIE still owned
++		 * the buffer -- the concurrent-access hazard the arch_nop()
++		 * sequences elsewhere exist to avoid. Clear it first so the
++		 * handshake is real.
++		 *
++		 * The wait is also bounded: this runs in interrupt context
++		 * (rpi_pico_handle_setup() calls it from the ISR), and an
++		 * endpoint that never goes idle would otherwise hang the
++		 * system. Giving up leaves the abort in progress, which is
++		 * still better than spinning forever with interrupts masked.
++		 */
++		sys_write32(ep_mask, abort_done_reg);
+ 		rpi_pico_bit_set(abort_reg, ep_mask);
++
+ 		while ((sys_read32(abort_done_reg) & ep_mask) != ep_mask) {
++			if (++spins > RPI_PICO_ABORT_SPIN_LIMIT) {
++				LOG_ERR("ep 0x%02x abort handshake timed out", ep);
++				break;
++			}
+ 		}
++
++		/* Acknowledge the handshake (write-1-to-clear). */
++		sys_write32(ep_mask, abort_done_reg);
+ 	}
+ 
+ 	buf_ctrl &= ~USB_BUF_CTRL_AVAIL;
+@@ -649,12 +717,34 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
+ 
+ 	buf_status = sys_read32((mm_reg_t)&base->buf_status);
+ 
++	/*
++	 * BUFF_STATUS bits are write-1-to-clear, and INTS.BUFF_STATUS is a
++	 * read-only level derived from them ("Raised when any bit in
++	 * BUFF_STATUS is set. Clear by clearing all bits in BUFF_STATUS").
++	 *
++	 * Clearing them through REG_ALIAS_CLR_BITS writes 0s, which is a no-op
++	 * on a W1C bit, so no completion was ever acknowledged: the register
++	 * accumulated every bit ever set and INTS.BUFF_STATUS stayed asserted
++	 * permanently. Every later USB interrupt then re-dispatched all
++	 * historical completions from a stale word, re-entering the OUT handler
++	 * for buffers the upper layer already owned -- appending duplicate
++	 * payload, or re-arming an endpoint whose net_buf had been handed up so
++	 * that the next host packet was absorbed by hardware with nothing
++	 * queued to receive it, and no completion was ever raised for it.
++	 *
++	 * Acknowledge the snapshot up front by writing the 1s back. Clearing
++	 * only the bits actually read means a completion that lands during the
++	 * dispatch loop stays set and is serviced on the next interrupt rather
++	 * than being silently discarded (the datasheet notes two buffers can
++	 * complete such that a cleared bit re-sets on the next cycle).
++	 */
++	sys_write32(buf_status, (mm_reg_t)&base->buf_status);
++
+ 	for (unsigned int i = 0; buf_status && i < USB_NUM_ENDPOINTS * 2; i++) {
+ 		if (!(buf_status & BIT(i))) {
+ 			continue;
+ 		}
+ 
+-		rpi_pico_bit_clr((mm_reg_t)&base->buf_status, BIT(i));
+ 		/* Odd bits in the register correspond to OUT endpoints */
+ 		if (i & 1U) {
+ 			ep = USB_EP_DIR_OUT | (i >> 1U);
+@@ -716,16 +806,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
  	}
  
@@ -168,7 +248,7 @@ index b0fb2fcf44f..632045540f2 100644
  	}
  
  	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
-@@ -733,19 +850,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -733,19 +906,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
  
  		priv->rwu_pending = false;
@@ -202,7 +282,7 @@ index b0fb2fcf44f..632045540f2 100644
  		handled |= USB_INTS_BUS_RESET_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
  
-@@ -812,6 +936,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -812,6 +992,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_SETUP_REQ_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
  

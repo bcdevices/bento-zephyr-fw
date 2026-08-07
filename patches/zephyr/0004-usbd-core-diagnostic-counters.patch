@@ -1,8 +1,8 @@
 diff --git i/subsys/usb/device_next/usbd_core.c w/subsys/usb/device_next/usbd_core.c
-index 9f24530fc2c..38634457dd3 100644
+index 9f24530fc2c..ef8e2d6d868 100644
 --- i/subsys/usb/device_next/usbd_core.c
 +++ w/subsys/usb/device_next/usbd_core.c
-@@ -59,15 +59,29 @@ static int event_handler_ep_request(struct usbd_context *const uds_ctx,
+@@ -59,21 +59,47 @@ static int event_handler_ep_request(struct usbd_context *const uds_ctx,
  	return ret;
  }
  
@@ -20,9 +20,31 @@ index 9f24530fc2c..38634457dd3 100644
  	struct usbd_config_node *cfg_nd;
  	struct usbd_class_node *c_nd;
  
+-	if (!usbd_state_is_configured(uds_ctx)) {
+-		return;
+-	}
 +	usbd_core_ch9_state = (uint32_t)uds_ctx->ch9_data.state;
-+
- 	if (!usbd_state_is_configured(uds_ctx)) {
+ 
++	/*
++	 * Iterating the class list requires a current configuration, but do not
++	 * gate on the protocol state itself.
++	 *
++	 * Suspend is orthogonal to Default/Address/Configured (USB 2.0 section
++	 * 9.1.1.6) -- a device can legitimately be suspended from any of them,
++	 * and hosts routinely suspend a port between enumeration steps. Gating
++	 * the broadcast on CONFIGURED dropped those events, while
++	 * usbd_status_suspended() below was updated unconditionally, so the
++	 * core's view and the class drivers' view diverged.
++	 *
++	 * The damaging case: a suspend delivered while configured, then a bus
++	 * reset (state -> DEFAULT), then the resume -- which was dropped. Class
++	 * drivers stayed suspended forever with no further resume coming, and
++	 * any class that suppresses transfers while suspended went permanently
++	 * mute.
++	 */
+ 	cfg_nd = usbd_config_get_current(uds_ctx);
+ 	if (cfg_nd == NULL) {
+-		LOG_ERR("Failed to get cfg_nd, despite configured state");
 +		usbd_core_bcast_blocked++;
 +		usbd_core_blocked_state = (uint32_t)uds_ctx->ch9_data.state;
 +		usbd_core_blocked_type = (uint32_t)event->type;
@@ -30,9 +52,81 @@ index 9f24530fc2c..38634457dd3 100644
  	}
 +	usbd_core_bcast_ok++;
  
- 	cfg_nd = usbd_config_get_current(uds_ctx);
- 	if (cfg_nd == NULL) {
-@@ -148,12 +162,14 @@ static ALWAYS_INLINE void usbd_event_handler(struct usbd_context *const uds_ctx,
+ 	SYS_SLIST_FOR_EACH_CONTAINER(&cfg_nd->class_list, c_nd, node) {
+ 		switch (event->type) {
+@@ -95,7 +121,7 @@ static void usbd_class_bcast_event(struct usbd_context *const uds_ctx,
+ static int event_handler_bus_reset(struct usbd_context *const uds_ctx)
+ {
+ 	enum udc_bus_speed udc_speed;
+-	int ret;
++	int ret, cfg_ret;
+ 
+ 	usbd_status_suspended(uds_ctx, false);
+ 	ret = udc_set_address(uds_ctx->dev, 0);
+@@ -104,10 +130,25 @@ static int event_handler_bus_reset(struct usbd_context *const uds_ctx)
+ 		return ret;
+ 	}
+ 
+-	ret = usbd_config_set(uds_ctx, 0);
+-	if (ret) {
++	/*
++	 * Tear down the configuration, but do NOT let a failure here skip the
++	 * rest of the reset.
++	 *
++	 * usbd_config_set(0) -> usbd_config_reset() -> usbd_config_get_current()
++	 * returns -ENODATA whenever ch9_data.configuration is non-zero while
++	 * the state is not CONFIGURED. Returning early on that left the device
++	 * with its old protocol state, a stale speed, rwup still set and a
++	 * pending control IN transfer -- while USBD_MSG_RESET was still
++	 * published, so the application was told a reset had completed. Every
++	 * subsequent bus reset then took the same early return, making the
++	 * divergence permanent and unrecoverable without a device reset.
++	 *
++	 * The reset must always leave the stack in DEFAULT state, which is the
++	 * one thing that lets the host re-enumerate us.
++	 */
++	cfg_ret = usbd_config_set(uds_ctx, 0);
++	if (cfg_ret) {
+ 		LOG_ERR("Failed to set default state after bus reset");
+-		return ret;
+ 	}
+ 
+ 	/* There might be pending data stage transfer */
+@@ -127,9 +168,32 @@ static int event_handler_bus_reset(struct usbd_context *const uds_ctx)
+ 
+ 	uds_ctx->ch9_data.state = USBD_STATE_DEFAULT;
+ 
++	/*
++	 * Force the config value clear even if the teardown above failed,
++	 * otherwise configuration != 0 with state == DEFAULT persists and the
++	 * next reset fails the same way.
++	 */
++	usbd_set_config_value(uds_ctx, 0);
++
++	/*
++	 * A bus reset clears all endpoint halt conditions in hardware
++	 * (USB 2.0 section 9.4.5), but ch9_data.ep_halt was only ever cleared
++	 * at init. A stale bit makes GET_STATUS report an endpoint as halted
++	 * when it is not.
++	 */
++	uds_ctx->ch9_data.ep_halt = 0;
++
+ 	uds_ctx->status.rwup = false;
+ 
+-	return 0;
++	/*
++	 * A reset can land mid-control-transfer, leaving ctrl_type at
++	 * CTRL_AWAIT_STATUS_STAGE and post_status set. Neither was cleared on
++	 * reset (only at usbd_enable() time), so restart the control pipe.
++	 * Note this also re-asserts USBD_STATE_DEFAULT, which is what we want.
++	 */
++	usbd_init_control_pipe(uds_ctx);
++
++	return cfg_ret;
+ }
+ 
+ 
+@@ -148,12 +212,14 @@ static ALWAYS_INLINE void usbd_event_handler(struct usbd_context *const uds_ctx,
  		usbd_msg_pub_simple(uds_ctx, USBD_MSG_VBUS_READY, 0);
  		break;
  	case UDC_EVT_SUSPEND:

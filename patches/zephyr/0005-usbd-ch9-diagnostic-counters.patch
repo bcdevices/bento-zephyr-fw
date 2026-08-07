@@ -1,5 +1,5 @@
 diff --git i/subsys/usb/device_next/usbd_ch9.c w/subsys/usb/device_next/usbd_ch9.c
-index 599eb161178..4af79fca4f7 100644
+index 599eb161178..19393ce4ece 100644
 --- i/subsys/usb/device_next/usbd_ch9.c
 +++ w/subsys/usb/device_next/usbd_ch9.c
 @@ -24,6 +24,15 @@
@@ -18,7 +18,29 @@ index 599eb161178..4af79fca4f7 100644
  #define CTRL_AWAIT_SETUP_DATA		0
  #define CTRL_AWAIT_STATUS_STAGE		1
  
-@@ -1142,6 +1151,24 @@ int usbd_handle_ctrl_xfer(struct usbd_context *const uds_ctx,
+@@ -155,6 +164,21 @@ static int sreq_set_configuration(struct usbd_context *const uds_ctx)
+ 
+ 	if (setup->wValue == usbd_get_config_value(uds_ctx)) {
+ 		LOG_DBG("Already in the configuration %u", setup->wValue);
++		/*
++		 * Re-assert the protocol state before returning. This compared
++		 * only ch9_data.configuration and skipped the state assignment
++		 * below, so a device whose configuration value was already set
++		 * while its state had diverged (a partially failed
++		 * usbd_config_set leaves the value set with the state
++		 * unchanged) would ACK this request, leaving the host believing
++		 * the device is configured while usbd_state_is_configured()
++		 * returns false. Everything gated on that state then fails
++		 * silently -- most damagingly usbd_class_bcast_event(), so
++		 * class drivers stop receiving suspend and resume entirely.
++		 */
++		uds_ctx->ch9_data.state = (setup->wValue == 0) ?
++					  USBD_STATE_ADDRESS :
++					  USBD_STATE_CONFIGURED;
+ 		return 0;
+ 	}
+ 
+@@ -1142,6 +1166,24 @@ int usbd_handle_ctrl_xfer(struct usbd_context *const uds_ctx,
  		return -EIO;
  	}
  
