@@ -123,6 +123,9 @@ extern uint32_t usbd_cdc_acm_rx_enq;
 extern uint32_t usbd_cdc_acm_rx_done;
 extern uint32_t usbd_cdc_acm_rx_err;
 extern uint32_t usbd_cdc_acm_last_req_err;
+extern uint32_t usbd_cdc_acm_tx_enq;
+extern uint32_t usbd_cdc_acm_tx_done;
+extern uint32_t usbd_cdc_acm_tx_claim_miss;
 extern uint32_t usbd_core_evt_susp;
 extern uint32_t usbd_core_evt_res;
 extern uint32_t usbd_core_bcast_blocked;
@@ -202,6 +205,24 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.setups,
 			       udc_rpi_pico_susp_trace.sie_at_reset,
 			       udc_rpi_pico_susp_trace.addr_at_reset);
+			printk("  tx enq=%u done=%u claimmiss=%u\n",
+			       usbd_cdc_acm_tx_enq, usbd_cdc_acm_tx_done,
+			       usbd_cdc_acm_tx_claim_miss);
+			printk("  IN armed=%u bs=%u finpost=%u din=%u xnfail=%u contfail=%u/%u nobuf=%u cont=%u\n",
+			       udc_rpi_pico_susp_trace.in_armed,
+			       udc_rpi_pico_susp_trace.in_bs,
+			       udc_rpi_pico_susp_trace.in_fin_post,
+			       udc_rpi_pico_susp_trace.in_evt_din,
+			       udc_rpi_pico_susp_trace.xn_fail,
+			       udc_rpi_pico_susp_trace.in_cont_fail,
+			       udc_rpi_pico_susp_trace.out_cont_fail,
+			       udc_rpi_pico_susp_trace.in_nobuf,
+			       udc_rpi_pico_susp_trace.in_cont);
+			printk("  udc newbusy=%u ep=%02x finbusy=%u qafterfin=%u\n",
+			       udc_rpi_pico_susp_trace.new_but_busy,
+			       udc_rpi_pico_susp_trace.last_busy_ep,
+			       udc_rpi_pico_susp_trace.fin_but_busy,
+			       udc_rpi_pico_susp_trace.queued_after_fin);
 			printk("  ch9 setups=%u last_req=%08x errs=%u last_err=%u\n",
 			       usbd_ch9_setup_count, usbd_ch9_last_req,
 			       usbd_ch9_err_count, usbd_ch9_last_err);

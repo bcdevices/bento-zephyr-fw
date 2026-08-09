@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..b35b018a2d5 100644
+index b0fb2fcf44f..25dddcf43e1 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,24 @@
@@ -143,8 +143,55 @@ index b0fb2fcf44f..b35b018a2d5 100644
  	udc_ep_set_busy(ep_cfg, false);
  	LOG_INF("Canceled ep 0x%02x transaction", ep);
  }
-@@ -588,7 +689,19 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+@@ -437,6 +538,7 @@ static int rpi_pico_handle_evt_din(const struct device *dev,
+ 	}
  
+ 	buf = udc_buf_get(cfg);
++	udc_rpi_pico_susp_trace.in_evt_din++;
+ 	udc_ep_set_busy(cfg, false);
+ 
+ 	if (cfg->addr == USB_CONTROL_EP_IN) {
+@@ -487,8 +589,12 @@ static void rpi_pico_handle_xfer_next(const struct device *dev,
+ 	}
+ 
+ 	if (err != 0) {
++		udc_rpi_pico_susp_trace.xn_fail++;
+ 		udc_submit_ep_event(dev, buf, -ECONNREFUSED);
+ 	} else {
++		if (USB_EP_DIR_IS_IN(cfg->addr)) {
++			udc_rpi_pico_susp_trace.in_armed++;
++		}
+ 		udc_ep_set_busy(cfg, true);
+ 	}
+ }
+@@ -524,8 +630,13 @@ static ALWAYS_INLINE void rpi_pico_thread_handler(void *const arg)
+ 			if (!udc_ep_is_busy(ep_cfg)) {
+ 				rpi_pico_handle_xfer_next(dev, ep_cfg);
+ 			} else {
++				udc_rpi_pico_susp_trace.fin_but_busy++;
+ 				LOG_ERR("Endpoint 0x%02x busy", ep);
+ 			}
++
++			if (udc_buf_peek(ep_cfg) != NULL) {
++				udc_rpi_pico_susp_trace.queued_after_fin++;
++			}
+ 		}
+ 	}
+ 
+@@ -542,6 +653,8 @@ static ALWAYS_INLINE void rpi_pico_thread_handler(void *const arg)
+ 			if (!udc_ep_is_busy(ep_cfg)) {
+ 				rpi_pico_handle_xfer_next(dev, ep_cfg);
+ 			} else {
++				udc_rpi_pico_susp_trace.new_but_busy++;
++				udc_rpi_pico_susp_trace.last_busy_ep = ep;
+ 				LOG_ERR("Endpoint 0x%02x busy", ep);
+ 			}
+ 		}
+@@ -586,9 +699,23 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+ 	struct net_buf *buf;
+ 	size_t len;
+ 
++	udc_rpi_pico_susp_trace.in_bs++;
  	buf = udc_buf_peek(ep_cfg);
  	if (buf == NULL) {
 +		/*
@@ -159,11 +206,100 @@ index b0fb2fcf44f..b35b018a2d5 100644
 +		 * shortage killed reception permanently.
 +		 */
  		LOG_ERR("No buffer for ep 0x%02x", ep);
++		udc_rpi_pico_susp_trace.in_nobuf++;
 +		udc_ep_set_busy(ep_cfg, false);
  		udc_submit_event(dev, UDC_EVT_ERROR, -ENOBUFS);
  		return;
  	}
-@@ -649,12 +762,34 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
+@@ -596,18 +723,52 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+ 	len = read_buf_ctrl_reg(dev, ep) & USB_BUF_CTRL_LEN_MASK;
+ 	net_buf_pull(buf, len);
+ 
+-	if (buf->len) {
++	/*
++	 * Continue a multi-packet IN transfer, or finish it.
++	 *
++	 * rpi_pico_prep_tx() fails with -EBUSY when the controller still owns
++	 * the buffer. That return was previously swallowed by __ASSERT, which
++	 * is compiled out whenever CONFIG_ASSERT=n -- the normal case for this
++	 * firmware. With the value discarded, no packet was armed AND
++	 * xfer_finished was never set, so no XFER_FINISHED was posted, the
++	 * driver thread never ran for this endpoint, and no completion reached
++	 * the class driver. The transfer vanished with stat.busy still set,
++	 * which is terminal: every re-arm path is gated on that flag and only
++	 * a completion clears it.
++	 *
++	 * Measured on hardware at the wedge: IN armed=43 bs=43 finpost=42 --
++	 * one completion entered this handler and never posted, matching the
++	 * class-level TX skew (enq=22 done=21) and a stuck CDC_ACM_TX_FIFO_BUSY
++	 * with tx_pending idle.
++	 *
++	 * Post the finish event on failure instead of dropping it. The buffer
++	 * is left queued, so handle_evt_din() completes it and the endpoint is
++	 * released; the port keeps working instead of going mute.
++	 */
++	if (buf->len || udc_ep_buf_has_zlp(buf)) {
++		bool zlp = buf->len == 0;
++
++		udc_rpi_pico_susp_trace.in_cont++;
++
+ 		err = rpi_pico_prep_tx(dev, buf, ep_cfg);
+-		__ASSERT(err == 0, "Failed to start new IN transaction");
+-	} else {
+-		if (udc_ep_buf_has_zlp(buf)) {
+-			err = rpi_pico_prep_tx(dev, buf, ep_cfg);
+-			__ASSERT(err == 0, "Failed to start new IN transaction");
+-			udc_ep_buf_clear_zlp(buf);
+-		} else {
++		if (err != 0) {
++			LOG_ERR("IN continuation failed on ep 0x%02x (%d)",
++				ep, err);
++			udc_rpi_pico_susp_trace.in_cont_fail++;
++			udc_rpi_pico_susp_trace.in_fin_post++;
+ 			atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
+-			k_event_post(&priv->events, BIT(RPI_PICO_EVT_XFER_FINISHED));
++			k_event_post(&priv->events,
++				     BIT(RPI_PICO_EVT_XFER_FINISHED));
++			return;
+ 		}
++
++		if (zlp) {
++			udc_ep_buf_clear_zlp(buf);
++		}
++	} else {
++		udc_rpi_pico_susp_trace.in_fin_post++;
++		atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
++		k_event_post(&priv->events, BIT(RPI_PICO_EVT_XFER_FINISHED));
+ 	}
+ }
+ 
+@@ -630,10 +791,23 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
+ 	net_buf_add_mem(buf, ep_data->buf, MIN(len, net_buf_tailroom(buf)));
+ 
+ 	if (net_buf_tailroom(buf) && len == udc_mps_ep_size(ep_cfg)) {
+-		__unused int err;
++		int err;
+ 
++		/*
++		 * Same swallow as the IN handler above: a discarded prep_rx()
++		 * error leaves the endpoint unarmed with no XFER_FINISHED
++		 * posted, so the transfer is lost and stat.busy sticks. Finish
++		 * it instead of dropping it.
++		 */
+ 		err = rpi_pico_prep_rx(dev, buf, ep_cfg);
+-		__ASSERT(err == 0, "Failed to start new OUT transaction");
++		if (err != 0) {
++			LOG_ERR("OUT continuation failed on ep 0x%02x (%d)",
++				ep, err);
++			udc_rpi_pico_susp_trace.out_cont_fail++;
++			atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
++			k_event_post(&priv->events,
++				     BIT(RPI_PICO_EVT_XFER_FINISHED));
++		}
+ 	} else {
+ 		atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
+ 		k_event_post(&priv->events, BIT(RPI_PICO_EVT_XFER_FINISHED));
+@@ -649,12 +823,34 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
  
  	buf_status = sys_read32((mm_reg_t)&base->buf_status);
  
@@ -199,7 +335,7 @@ index b0fb2fcf44f..b35b018a2d5 100644
  		/* Odd bits in the register correspond to OUT endpoints */
  		if (i & 1U) {
  			ep = USB_EP_DIR_OUT | (i >> 1U);
-@@ -716,16 +851,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -716,16 +912,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
  	}
  
@@ -308,7 +444,7 @@ index b0fb2fcf44f..b35b018a2d5 100644
  	}
  
  	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
-@@ -733,19 +951,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -733,19 +1012,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
  
  		priv->rwu_pending = false;
@@ -342,7 +478,7 @@ index b0fb2fcf44f..b35b018a2d5 100644
  		handled |= USB_INTS_BUS_RESET_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
  
-@@ -812,6 +1037,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -812,6 +1098,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_SETUP_REQ_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
  
@@ -350,7 +486,7 @@ index b0fb2fcf44f..b35b018a2d5 100644
  		rpi_pico_handle_setup(dev);
  	}
  
-@@ -975,6 +1201,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
+@@ -975,6 +1262,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
  		/* Cancel responds with a STALL handshake.*/
  		rpi_pico_ep_cancel(dev, cfg->addr);
  	} else {

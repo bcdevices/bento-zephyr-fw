@@ -1,8 +1,8 @@
 diff --git i/subsys/usb/device_next/class/usbd_cdc_acm.c w/subsys/usb/device_next/class/usbd_cdc_acm.c
-index d3921c0f146..e704b4d1170 100644
+index d3921c0f146..029c2026729 100644
 --- i/subsys/usb/device_next/class/usbd_cdc_acm.c
 +++ w/subsys/usb/device_next/class/usbd_cdc_acm.c
-@@ -35,6 +35,15 @@
+@@ -35,6 +35,18 @@
  #endif
  LOG_MODULE_REGISTER(usbd_cdc_acm, CONFIG_USBD_CDC_ACM_LOG_LEVEL);
  
@@ -14,11 +14,14 @@ index d3921c0f146..e704b4d1170 100644
 +uint32_t usbd_cdc_acm_rx_done;
 +uint32_t usbd_cdc_acm_rx_err;
 +uint32_t usbd_cdc_acm_last_req_err;
++uint32_t usbd_cdc_acm_tx_enq;
++uint32_t usbd_cdc_acm_tx_done;
++uint32_t usbd_cdc_acm_tx_claim_miss;
 +
  #define CDC_ACM_DEFAULT_LINECODING	{sys_cpu_to_le32(115200), 0, 0, 8}
  #define CDC_ACM_DEFAULT_INT_EP_MPS	16
  #define CDC_ACM_INTERVAL_DEFAULT	10000UL
-@@ -122,6 +131,16 @@ struct cdc_acm_uart_data {
+@@ -122,6 +134,16 @@ struct cdc_acm_uart_data {
  	struct k_work_delayable tx_fifo_work;
  	/* USBD CDC ACM RX fifo work */
  	struct k_work rx_fifo_work;
@@ -35,7 +38,7 @@ index d3921c0f146..e704b4d1170 100644
  	atomic_t state;
  	struct k_sem notif_sem;
  	struct k_spinlock lock;
-@@ -280,6 +299,14 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+@@ -280,6 +302,14 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
  	struct udc_buf_info *bi;
  
  	bi = udc_get_buf_info(buf);
@@ -50,7 +53,7 @@ index d3921c0f146..e704b4d1170 100644
  	if (err) {
  		if (err == -ECONNABORTED) {
  			LOG_WRN("request ep 0x%02x, len %u cancelled",
-@@ -289,16 +316,51 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+@@ -289,16 +319,51 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
  				bi->ep, buf->len);
  		}
  
@@ -104,7 +107,7 @@ index d3921c0f146..e704b4d1170 100644
  		}
  
  		goto ep_request_error;
-@@ -314,8 +376,23 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+@@ -314,21 +379,47 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
  			cdc_acm_work_submit(&data->irq_cb_work);
  		}
  
@@ -130,7 +133,12 @@ index d3921c0f146..e704b4d1170 100644
  	}
  
  	if (bi->ep == cdc_acm_get_bulk_in(c_data)) {
-@@ -324,11 +401,18 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+ 		/* TX transfer completion */
++		usbd_cdc_acm_tx_done++;
++		if (data->tx_claim != NULL && data->tx_claim != buf) {
++			usbd_cdc_acm_tx_claim_miss++;
++		}
+ 		if (data->cb) {
  			cdc_acm_work_submit(&data->irq_cb_work);
  		}
  
@@ -153,7 +161,7 @@ index d3921c0f146..e704b4d1170 100644
  		}
  
  	}
-@@ -356,10 +440,54 @@ static void usbd_cdc_acm_enable(struct usbd_class_data *const c_data)
+@@ -356,10 +447,54 @@ static void usbd_cdc_acm_enable(struct usbd_class_data *const c_data)
  	atomic_set_bit(&data->state, CDC_ACM_CLASS_ENABLED);
  	LOG_INF("Configuration enabled");
  
@@ -208,7 +216,7 @@ index d3921c0f146..e704b4d1170 100644
  	if (atomic_test_bit(&data->state, CDC_ACM_IRQ_TX_ENABLED)) {
  		if (ring_buf_space_get(data->tx_fifo.rb)) {
  			/* Raise TX ready interrupt */
-@@ -378,6 +506,11 @@ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
+@@ -378,6 +513,11 @@ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
  
  	atomic_clear_bit(&data->state, CDC_ACM_CLASS_ENABLED);
  	atomic_clear_bit(&data->state, CDC_ACM_CLASS_SUSPENDED);
@@ -220,7 +228,7 @@ index d3921c0f146..e704b4d1170 100644
  	LOG_INF("Configuration disabled");
  }
  
-@@ -387,15 +520,67 @@ static void usbd_cdc_acm_suspended(struct usbd_class_data *const c_data)
+@@ -387,15 +527,67 @@ static void usbd_cdc_acm_suspended(struct usbd_class_data *const c_data)
  	struct cdc_acm_uart_data *data = dev->data;
  
  	/* FIXME: filter stray suspended events earlier */
@@ -288,11 +296,12 @@ index d3921c0f146..e704b4d1170 100644
  }
  
  static void *usbd_cdc_acm_get_desc(struct usbd_class_data *const c_data,
-@@ -663,11 +848,23 @@ static void cdc_acm_tx_fifo_handler(struct k_work *work)
+@@ -663,11 +855,24 @@ static void cdc_acm_tx_fifo_handler(struct k_work *work)
  
  	data->zlp_needed = len != 0 && len % cdc_acm_get_bulk_mps(c_data) == 0;
  
 +	/* Record which buffer owns the TX claim; see usbd_cdc_acm_request(). */
++	usbd_cdc_acm_tx_enq++;
 +	data->tx_claim = buf;
  	ret = usbd_ep_enqueue(c_data, buf);
  	if (ret) {
@@ -312,7 +321,7 @@ index d3921c0f146..e704b4d1170 100644
  	}
  }
  
-@@ -702,6 +899,7 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
+@@ -702,6 +907,7 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
  		return;
  	}
  
@@ -320,7 +329,7 @@ index d3921c0f146..e704b4d1170 100644
  	if (atomic_test_and_set_bit(&data->state, CDC_ACM_RX_FIFO_BUSY)) {
  		LOG_WRN("RX transfer already in progress");
  		return;
-@@ -709,17 +907,32 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
+@@ -709,17 +915,32 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
  
  	buf = cdc_acm_buf_alloc(c_data, cdc_acm_get_bulk_out(c_data));
  	if (buf == NULL) {

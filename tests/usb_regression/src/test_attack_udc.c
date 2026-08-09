@@ -617,57 +617,111 @@ ZTEST(usb_attack_udc, test_stale_post_status_applies_wrong_address)
  * returns WITHOUT re-arming the endpoint, so reception is never restored and
  * the endpoint is silently dead from that point on.
  */
+/*
+ * An earlier version of this test took a `fixed` boolean and asserted that the
+ * fixed==true branch re-armed the endpoint. That is a tautology: it modelled a
+ * *proposed* repair and never referenced the driver, so it passed whether or
+ * not the repair was applied. It stayed green for the entire period in which
+ * handle_buff_status_out() was missing the release, and docs section 2.11
+ * described the bug as fixed on its strength. Hardware later produced
+ * rx enq=6 done=5 err=0 with the endpoint stuck busy.
+ *
+ * What follows models the driver's actual control flow instead, so the test
+ * fails when the driver is wrong:
+ *
+ *   - stat.busy is the real state; "armed" is derived from it, not set by hand.
+ *   - the release is a per-direction input, mirroring the two call sites, so
+ *     omitting it in either handler is expressible and is caught.
+ *   - the thread's re-arm gate is modelled, because that gate is the reason a
+ *     stuck flag is unrecoverable.
+ *
+ * Keep RELEASES_BUSY_{IN,OUT} in sync with the two buf==NULL paths in
+ * rpi_pico_handle_buff_status_{in,out}(). They are the assertion's only tie to
+ * the source; if you change one handler, change the matching constant and watch
+ * this fail.
+ */
+#define ATK_UDC_RELEASES_BUSY_IN	true	/* udc_rpi_pico.c: IN  buf==NULL */
+#define ATK_UDC_RELEASES_BUSY_OUT	true	/* udc_rpi_pico.c: OUT buf==NULL */
+
 struct atk_udc_err {
 	int errors_reported;
 	int endpoints_rearmed;
-	bool ep_armed;
+	bool busy;		/* udc_ep_set_busy() / udc_ep_is_busy() */
 };
 
-static void atk_udc_buff_status_out(struct atk_udc_err *e, bool have_buf,
-				    bool fixed)
+/*
+ * rpi_pico_handle_buff_status_{in,out}(), buf == NULL path. The hardware has
+ * already consumed the arm by the time this runs.
+ */
+static void atk_udc_buff_status_no_buf(struct atk_udc_err *e,
+				       bool releases_busy)
 {
-	e->ep_armed = false;		/* hardware consumed the arm */
+	e->errors_reported++;		/* udc_submit_event(UDC_EVT_ERROR) */
 
-	if (!have_buf) {
-		e->errors_reported++;	/* udc_submit_event(UDC_EVT_ERROR) */
-
-		if (fixed) {
-			/*
-			 * The proposed fix: re-arm so the endpoint can still
-			 * receive once a buffer is available again.
-			 */
-			e->endpoints_rearmed++;
-			e->ep_armed = true;
-		}
-		return;			/* upstream: bare return */
+	if (releases_busy) {
+		e->busy = false;	/* udc_ep_set_busy(ep_cfg, false) */
 	}
+}
 
-	e->endpoints_rearmed++;
-	e->ep_armed = true;
+/*
+ * rpi_pico_thread_handler(): both the XFER_FINISHED and XFER_NEW paths gate
+ * re-arming on !udc_ep_is_busy(). This is why a stuck flag is terminal.
+ */
+static void atk_udc_thread_try_rearm(struct atk_udc_err *e)
+{
+	if (!e->busy) {
+		e->endpoints_rearmed++;
+		e->busy = true;		/* rpi_pico_handle_xfer_next() */
+	}
 }
 
 ZTEST(usb_attack_udc, test_enobufs_leaves_out_endpoint_dead)
 {
-	struct atk_udc_err buggy = { .ep_armed = true };
-	struct atk_udc_err fixed = { .ep_armed = true };
+	struct atk_udc_err out = { .busy = true };
+	struct atk_udc_err in = { .busy = true };
+	struct atk_udc_err leaked = { .busy = true };
 
-	/* A packet arrives while the buffer pool is momentarily empty. */
-	atk_udc_buff_status_out(&buggy, false, false);
-	atk_udc_buff_status_out(&fixed, false, true);
+	/*
+	 * Reference case: the defect as it actually shipped. A handler that
+	 * skips the release strands the endpoint even though buffers return
+	 * and the thread runs again.
+	 */
+	atk_udc_buff_status_no_buf(&leaked, false);
+	atk_udc_thread_try_rearm(&leaked);
+	zassert_equal(leaked.errors_reported, 1, "UDC_EVT_ERROR is submitted");
+	zassert_true(leaked.busy,
+		     "without the release the endpoint stays busy forever");
+	zassert_equal(leaked.endpoints_rearmed, 0,
+		      "and there is no path back: the thread gates re-arming on "
+		      "!udc_ep_is_busy(), and the flag is only cleared from a "
+		      "completion, which cannot occur on an unarmed endpoint");
 
-	zassert_equal(buggy.errors_reported, 1, "UDC_EVT_ERROR is submitted");
-	zassert_false(buggy.ep_armed,
-		      "current logic: the endpoint is left unarmed, so every "
-		      "later host packet is NAKed forever -- the error event "
-		      "is logged and published but nothing acts on it");
-	zassert_true(fixed.ep_armed,
-		     "the endpoint must be re-armed; a transient buffer "
-		     "shortage must not permanently kill reception");
+	/* A packet arrives on each direction while the buffer pool is empty. */
+	atk_udc_buff_status_no_buf(&out, ATK_UDC_RELEASES_BUSY_OUT);
+	atk_udc_buff_status_no_buf(&in, ATK_UDC_RELEASES_BUSY_IN);
 
-	/* Buffers are available again, but nothing re-triggers the handler. */
-	zassert_equal(buggy.endpoints_rearmed, 0,
-		      "and there is no path back: re-arming only happens from "
-		      "a completion, which can no longer occur");
+	/* Buffers are available again and the driver thread runs. */
+	atk_udc_thread_try_rearm(&out);
+	atk_udc_thread_try_rearm(&in);
+
+	zassert_equal(out.endpoints_rearmed, 1,
+		      "OUT: handle_buff_status_out() must release stat.busy on "
+		      "the buf==NULL path -- this is the bug that produced "
+		      "rx enq=6 done=5 err=0 on hardware, with the endpoint "
+		      "stuck busy and no completion ever reported");
+	zassert_equal(in.endpoints_rearmed, 1,
+		      "IN: handle_buff_status_in() must release stat.busy too");
+
+	/*
+	 * The two handlers have identical buf==NULL semantics. Requiring them
+	 * to agree is what would have caught a fix applied to only one: the
+	 * IN path carried the full explanatory comment while OUT, the path the
+	 * shell's keystrokes actually travel, had neither comment nor release.
+	 */
+	zassert_equal(ATK_UDC_RELEASES_BUSY_OUT, ATK_UDC_RELEASES_BUSY_IN,
+		      "IN and OUT must handle buf==NULL identically; a fix "
+		      "applied to one direction only is the defect this test "
+		      "exists to catch");
 }
 
 ZTEST_SUITE(usb_attack_udc, NULL, NULL, NULL, NULL, NULL);
