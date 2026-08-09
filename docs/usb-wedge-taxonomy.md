@@ -231,6 +231,30 @@ counters are simply tracking ISR frequency. The event log confirms the ISRs
 carry `0x200` alone with no SOF bit (`0x004`) set. Neither counter measures the
 true 1000 frames/s bus rate.
 
+### The CRC rate is independent of traffic
+
+Measured directly, same build, same session:
+
+| Condition | CRC/sec |
+|---|---|
+| Idle -- no shell traffic at all | 10.8 |
+| Continuous load -- newline hammered as fast as the port accepts | 9.1 |
+
+Statistically identical. **The error rate does not depend on what the firmware
+is doing.** On an idle bus the only traffic is host SOFs and periodic polling,
+so ~10 errors/second arrive whether or not this firmware transfers a single
+byte.
+
+This eliminates the firmware as the *source* of the errors. No amount of driver
+or class-layer work will reduce a rate that is already at full value with the
+data path quiescent. It also means the errors are not caused by anything about
+packet size, endpoint usage, toggle handling, or transfer pacing.
+
+The remaining candidates are all below the firmware: cable, connector, board
+routing/termination, host port, or the RP2350 SIE itself. Distinguishing them
+needs either a swap test (different cable, port, host) or an instrument
+(oscilloscope on the differential pair, or a protocol analyser).
+
 ### What has NOT been established
 
 - Whether the CRC errors originate in the cable, connector, board, host port, or
