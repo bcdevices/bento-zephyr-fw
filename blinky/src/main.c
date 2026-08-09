@@ -297,6 +297,15 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.snap_sof,
 			       udc_rpi_pico_susp_trace.out_halted,
 			       udc_rpi_pico_susp_trace.in_halted);
+			printk("  err crc=%u bitstuff=%u rxover=%u | rxto st: "
+			       "in=%08x out=%08x addr=%08x sie=%08x\n",
+			       udc_rpi_pico_susp_trace.crc_errors,
+			       udc_rpi_pico_susp_trace.bitstuff_errors,
+			       udc_rpi_pico_susp_trace.rxover_errors,
+			       udc_rpi_pico_susp_trace.rxto_in_bufctrl,
+			       udc_rpi_pico_susp_trace.rxto_out_bufctrl,
+			       udc_rpi_pico_susp_trace.rxto_addr,
+			       udc_rpi_pico_susp_trace.rxto_sie);
 			printk("  rxto=%u lastrxto=%u reattach=%u\n",
 			       udc_rpi_pico_susp_trace.rx_timeouts,
 			       udc_rpi_pico_susp_trace.last_rx_timeout_ms,

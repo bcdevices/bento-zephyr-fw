@@ -193,3 +193,50 @@ cause. Two cautions, both learned the hard way:
 - Absence-based recovery has failed here twice before (automatic re-enumeration
   on a timeout heuristic; dropping shell output on TXDONE timeout). See
   `usb-shell-investigation.md` section 6.
+
+
+---
+
+## Root-cause status: a sustained CRC error rate
+
+Measured with per-error-type counters on a link that was **working at the time**
+(shell responding, SOFs advancing, 30/30 transactions surviving):
+
+```
+err crc=2277 -> 2332 over 5 s   (~10 CRC errors per second, sustained)
+    bitstuff=1                  (essentially zero)
+    rxover=0
+```
+
+The ISR fires roughly ten times a second with `INTS=0x200` (ERROR_CRC) and
+nothing else set. `SIE_STATUS.CRC_ERROR` reads clear between interrupts, so the
+write-1-to-clear path is working and each one is a genuinely new error, not a
+latch replaying (which was the artifact behind the section 2.1 confusion).
+
+A healthy USB link should see essentially zero CRC errors. Ten per second is a
+physical-layer fault rate. The near-total absence of bit-stuff errors alongside
+it is worth noting -- the two usually track together when signalling is
+marginal.
+
+**This is the most likely root cause of the wedges.** The device is
+structurally correct at every wedge (endpoints armed, nothing halted, `sw==hw`),
+and errors accumulate until the host stops servicing the port.
+
+### Instrumentation caveat, recorded so it is not misread
+
+`sof_seen` and the CRC counter appeared to advance at an identical ~9.6/s, which
+looked like a physical correlation. It is not: `sof_seen` increments on every
+ISR entry that observes a changed `SOF_RD`, so during a CRC-error storm both
+counters are simply tracking ISR frequency. The event log confirms the ISRs
+carry `0x200` alone with no SOF bit (`0x004`) set. Neither counter measures the
+true 1000 frames/s bus rate.
+
+### What has NOT been established
+
+- Whether the CRC errors originate in the cable, connector, board, host port, or
+  the RP2350 itself. No oscilloscope or protocol-analyser measurement has been
+  taken, and the counters cannot distinguish these.
+- Whether the rate differs across cables/ports/hosts. Section 5 of
+  `usb-shell-investigation.md` eliminated topology, but did so when the CRC
+  counts were believed to be a W1C artifact. That elimination should be redone
+  now that the errors are known to be real.
