@@ -310,6 +310,27 @@ static void tx_pump(struct tx_enable_model *m)
 	m->tx_pending = 0;
 }
 
+/*
+ * Whether usbd_cdc_acm_enable() drains a non-empty tx_fifo unconditionally.
+ *
+ * Keep this in sync with the `if (!ring_buf_is_empty(data->tx_fifo.rb))` block
+ * at the end of usbd_cdc_acm_enable(). It is this test's ONLY tie to the
+ * source: the model below cannot link the real driver (the host harness
+ * compiles standalone C against a shim), so without a constant that a person
+ * must update when the driver changes, a `fixed` boolean parameter would
+ * assert only that the model's own fixed branch behaves correctly -- a
+ * tautology that passes whether or not the driver contains the fix.
+ *
+ * That exact failure has already happened once in this suite: see the header
+ * of test_enobufs_leaves_out_endpoint_dead in test_attack_udc.c, where a
+ * `fixed` boolean kept a test green for the entire period in which the driver
+ * was missing the repair the test claimed to cover.
+ *
+ * Verified by mutation: deleting the driver block and flipping this to false
+ * must make the tests below fail.
+ */
+#define CDC_ENABLE_DRAINS_PENDING_TX	true
+
 static void tx_enable(struct tx_enable_model *m, bool fixed)
 {
 	m->state |= CLASS_ENABLED;
@@ -351,7 +372,7 @@ ZTEST(usb_state, test_enable_drains_pending_tx_without_irq_tx_enabled)
 	};
 
 	tx_enable(&buggy, false);
-	tx_enable(&fixed, true);
+	tx_enable(&fixed, CDC_ENABLE_DRAINS_PENDING_TX);
 
 	zassert_false(buggy.tx_handler_ran,
 		      "wedge Variant C: enable() takes the fifo-has-space arm "
@@ -384,7 +405,7 @@ ZTEST(usb_state, test_enable_drains_pending_tx_before_consumer_attaches)
 	};
 
 	tx_enable(&buggy, false);
-	tx_enable(&fixed, true);
+	tx_enable(&fixed, CDC_ENABLE_DRAINS_PENDING_TX);
 
 	zassert_false(buggy.tx_handler_ran,
 		      "with IRQ_TX_ENABLED clear the gated branch is skipped "
