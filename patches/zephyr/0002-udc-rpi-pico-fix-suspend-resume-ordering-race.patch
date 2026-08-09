@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..976f9a95bc7 100644
+index b0fb2fcf44f..aaa6dd6c9c0 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,24 @@
@@ -286,7 +286,7 @@ index b0fb2fcf44f..976f9a95bc7 100644
  	}
  }
  
-@@ -621,25 +788,87 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
+@@ -621,25 +788,108 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
  
  	buf = udc_buf_peek(ep_cfg);
  	if (buf == NULL) {
@@ -343,7 +343,16 @@ index b0fb2fcf44f..976f9a95bc7 100644
 + */
 +void udc_rpi_pico_reconcile_snapshot(const struct device *dev)
 +{
++	const struct rpi_pico_config *cfgp = dev->config;
++	usb_hw_t *base = cfgp->base;
 +	static const uint8_t eps[2] = { 0x01, 0x82 };
++
++	udc_rpi_pico_susp_trace.ep_stall_nak =
++		sys_read32((mm_reg_t)&base->ep_stall_arm);
++	udc_rpi_pico_susp_trace.snap_sie = sys_read32((mm_reg_t)&base->sie_status);
++	udc_rpi_pico_susp_trace.snap_buf_status =
++		sys_read32((mm_reg_t)&base->buf_status);
++	udc_rpi_pico_susp_trace.snap_sof = sys_read32((mm_reg_t)&base->sof_rd);
 +
 +	for (int i = 0; i < 2; i++) {
 +		struct udc_ep_config *cfg = udc_get_ep_cfg(dev, eps[i]);
@@ -358,6 +367,18 @@ index b0fb2fcf44f..976f9a95bc7 100644
 +		bc = read_buf_ctrl_reg(dev, eps[i]);
 +		sw_busy = udc_ep_is_busy(cfg);
 +		hw_busy = (bc & USB_BUF_CTRL_AVAIL) != 0;
++
++		if (i == 0) {
++			udc_rpi_pico_susp_trace.out_bufctrl = bc;
++			udc_rpi_pico_susp_trace.out_epctrl =
++				sys_read32(get_ep_ctrl_reg(dev, eps[i]));
++			udc_rpi_pico_susp_trace.out_halted = cfg->stat.halted;
++		} else {
++			udc_rpi_pico_susp_trace.in_bufctrl = bc;
++			udc_rpi_pico_susp_trace.in_epctrl =
++				sys_read32(get_ep_ctrl_reg(dev, eps[i]));
++			udc_rpi_pico_susp_trace.in_halted = cfg->stat.halted;
++		}
 +
 +		if (i == 0) {
 +			udc_rpi_pico_susp_trace.out_sw_busy = sw_busy;
@@ -376,7 +397,7 @@ index b0fb2fcf44f..976f9a95bc7 100644
  static void rpi_pico_handle_buff_status(const struct device *dev)
  {
  	const struct rpi_pico_config *config = dev->config;
-@@ -648,13 +877,40 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
+@@ -648,13 +898,40 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
  	uint8_t ep;
  
  	buf_status = sys_read32((mm_reg_t)&base->buf_status);
@@ -418,7 +439,7 @@ index b0fb2fcf44f..976f9a95bc7 100644
  		/* Odd bits in the register correspond to OUT endpoints */
  		if (i & 1U) {
  			ep = USB_EP_DIR_OUT | (i >> 1U);
-@@ -677,6 +933,11 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -677,6 +954,28 @@ static void rpi_pico_isr_handler(const struct device *dev)
  	uint32_t status = base->ints;
  	uint32_t handled = 0;
  
@@ -427,10 +448,27 @@ index b0fb2fcf44f..976f9a95bc7 100644
 +		udc_rpi_pico_susp_trace.isr_bs_seen++;
 +	}
 +
++	/*
++	 * Ring of the last 8 interrupt status words with the uptime at which
++	 * each arrived. The wedge is preceded by SOFs stopping entirely (the
++	 * frame counter freezes), so the interesting question is not what the
++	 * device looks like afterwards -- everything is provably consistent by
++	 * then -- but what the last thing that happened was. A host drops a
++	 * device that violates the protocol, and SOFs stop only afterwards, so
++	 * the cause would appear here as the final few events.
++	 */
++	{
++		uint8_t i = udc_rpi_pico_susp_trace.evlog_idx & 7U;
++
++		udc_rpi_pico_susp_trace.evlog_status[i] = status;
++		udc_rpi_pico_susp_trace.evlog_ms[i] = k_uptime_get_32();
++		udc_rpi_pico_susp_trace.evlog_idx++;
++	}
++
  	if (status & USB_INTS_DEV_SOF_BITS) {
  		handled |= USB_INTS_DEV_SOF_BITS;
  		udc_submit_sof_event(dev);
-@@ -716,16 +977,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -716,16 +1015,101 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
  	}
  
@@ -491,6 +529,8 @@ index b0fb2fcf44f..976f9a95bc7 100644
 +		if (sof != priv->last_sof) {
 +			priv->last_sof = sof;
 +			priv->last_sof_time = k_uptime_get_32();
++			udc_rpi_pico_susp_trace.last_sof_ms = priv->last_sof_time;
++			udc_rpi_pico_susp_trace.sof_seen++;
 +
 +			/*
 +			 * Frames are arriving, so the bus is running. If the
@@ -539,7 +579,7 @@ index b0fb2fcf44f..976f9a95bc7 100644
  	}
  
  	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
-@@ -733,19 +1077,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -733,19 +1117,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
  
  		priv->rwu_pending = false;
@@ -573,7 +613,7 @@ index b0fb2fcf44f..976f9a95bc7 100644
  		handled |= USB_INTS_BUS_RESET_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
  
-@@ -755,6 +1106,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -755,6 +1146,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  
  	if (status & USB_INTS_ERROR_DATA_SEQ_BITS) {
  		handled |= USB_INTS_ERROR_DATA_SEQ_BITS;
@@ -581,7 +621,7 @@ index b0fb2fcf44f..976f9a95bc7 100644
  		sie_status_clr(dev, USB_SIE_STATUS_DATA_SEQ_ERROR_BITS);
  		/*
  		 * This can be triggered before the STALL handshake response
-@@ -812,6 +1164,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -812,6 +1204,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_SETUP_REQ_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
  
@@ -589,7 +629,7 @@ index b0fb2fcf44f..976f9a95bc7 100644
  		rpi_pico_handle_setup(dev);
  	}
  
-@@ -975,6 +1328,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
+@@ -975,6 +1368,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
  		/* Cancel responds with a STALL handshake.*/
  		rpi_pico_ep_cancel(dev, cfg->addr);
  	} else {

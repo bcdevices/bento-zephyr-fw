@@ -248,6 +248,34 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.in_sw_busy,
 			       udc_rpi_pico_susp_trace.in_hw_avail,
 			       udc_rpi_pico_susp_trace.in_queued);
+			printk("  OUTbc=%08x OUTec=%08x INbc=%08x INec=%08x\n",
+			       udc_rpi_pico_susp_trace.out_bufctrl,
+			       udc_rpi_pico_susp_trace.out_epctrl,
+			       udc_rpi_pico_susp_trace.in_bufctrl,
+			       udc_rpi_pico_susp_trace.in_epctrl);
+			printk("  stallnak=%08x sie=%08x bufst=%08x sof=%u "
+			       "halt=%u/%u\n",
+			       udc_rpi_pico_susp_trace.ep_stall_nak,
+			       udc_rpi_pico_susp_trace.snap_sie,
+			       udc_rpi_pico_susp_trace.snap_buf_status,
+			       udc_rpi_pico_susp_trace.snap_sof,
+			       udc_rpi_pico_susp_trace.out_halted,
+			       udc_rpi_pico_susp_trace.in_halted);
+			printk("  sof_seen=%u last_sof_ms=%u now=%u (dead %u ms)\n",
+			       udc_rpi_pico_susp_trace.sof_seen,
+			       udc_rpi_pico_susp_trace.last_sof_ms,
+			       (uint32_t)k_uptime_get_32(),
+			       (uint32_t)k_uptime_get_32() -
+			       udc_rpi_pico_susp_trace.last_sof_ms);
+			printk("  evlog:");
+			for (int k = 0; k < 8; k++) {
+				int idx = (udc_rpi_pico_susp_trace.evlog_idx +
+					   k) & 7;
+				printk(" %08x@%u",
+				       udc_rpi_pico_susp_trace.evlog_status[idx],
+				       udc_rpi_pico_susp_trace.evlog_ms[idx]);
+			}
+			printk("\n");
 			printk("  rxwork runs=%u throttle=%u noten=%u busy=%u\n",
 			       usbd_cdc_acm_rx_work_runs,
 			       usbd_cdc_acm_rx_throttle,
