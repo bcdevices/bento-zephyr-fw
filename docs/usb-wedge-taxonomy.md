@@ -379,6 +379,33 @@ Next measurements, in order of value:
    for droop or noise coincident with error bursts. This is the one candidate
    class no software measurement can reach.
 
+### The wedge scales with packet count, not with which command runs
+
+`help` fails far more often than `app.version`. Measured, that is purely
+exposure -- not a code path unique to long replies:
+
+| Command | Bytes | 64-byte packets |
+|---|---|---|
+| `app.version` | 75 | 2 |
+| `help` | 1335 | 21 |
+
+`help` is a 10.5x larger surface for a per-transaction error.
+
+**The discriminating test:** `app.version` was run in a loop. It wedged at
+iteration 11, having sent roughly 20 packets -- essentially the same packet
+count at which a single `help` (21 packets) fails. The short command reaches the
+same failure, it just needs ~10 invocations to accumulate the same exposure.
+
+So the wedge is a function of packets transferred, which is exactly what a
+per-transaction error rate of order 10% predicts. There is no path that long
+replies uniquely trip. This is consistent with the CRC rate being
+traffic-independent: the fault is per-transaction, so anything that moves more
+transactions meets it sooner.
+
+Practical consequence for testing: measure wedges per packet, not per command
+or per transaction of the harness. Two runs that differ in reply size are not
+comparable.
+
 ### What has NOT been established
 
 - Whether the CRC errors originate in the cable, connector, board, host port, or
