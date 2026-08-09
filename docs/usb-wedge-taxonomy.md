@@ -66,7 +66,33 @@ every BUFF_STATUS dispatch -- including the ZLP/continuation packet armed from
 Both counters also cover all IN endpoints, not just bulk. Do not read `bs`
 against `armed` as a hardware signal.
 
-## Variant C -- startup failure, banner never sent
+## Variant C -- startup failure, banner never sent  [FIXED]
+
+**Status: fixed.** `usbd_cdc_acm_enable()` now drains a non-empty `tx_fifo`
+unconditionally (commit `37f8140`). Three fresh flashes at `--pacing 0.2
+--count 5` all survived with the full banner delivered, where Variant C
+previously accounted for 2 of 6 fresh-flash runs and wedged at transaction 1
+with 0 bytes. Confirmed separately by interactive shell use.
+
+The root cause was that every path scheduling the TX pump
+(`cdc_acm_tx_fifo_handler`) is edge-triggered on an event that has already
+happened, and after a re-enumeration with an idle shell all six were false
+while the FIFO held the banner:
+
+| Site | Fires when | Fails when |
+|---|---|---|
+| `:428` TX completion | a transfer completed AND fifo non-empty | nothing in flight, so no completion ever comes |
+| `:512` `enable()` | `IRQ_TX_ENABLED` AND fifo **full** | fifo has free space, so it takes the "ask the shell for more" branch |
+| `:598` `resumed()` | always | only on a resume event |
+| `:1175` `irq_cb` | `tx_fifo.altered` | only a fresh `fifo_fill` sets it |
+| `:1178` `irq_cb` | `zlp_needed` | cleared at `enable()` |
+| `:1251` `poll_out` | a new byte is written | shell has nothing to print |
+
+The fix is the symmetric counterpart of the RX priming ten lines above, and is
+level-triggered on the enumeration event rather than on a timer -- not the
+idleness class of recovery disproved in `usb-shell-investigation.md` section 6.
+
+### Original signature (retained for reference)
 
 ```
 cdc state=15   tx_pending=25   rx_pending=0
