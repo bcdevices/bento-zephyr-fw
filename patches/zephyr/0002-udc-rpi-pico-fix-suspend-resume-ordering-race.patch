@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..364e7d70d78 100644
+index b0fb2fcf44f..d8f744c6d78 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,34 @@
@@ -807,3 +807,33 @@ index b0fb2fcf44f..364e7d70d78 100644
  		rpi_pico_bit_clr(buf_ctrl_reg, USB_BUF_CTRL_STALL);
  	}
  
+@@ -1064,6 +1601,29 @@ static int udc_rpi_pico_enable(const struct device *dev)
+ 	sys_write32(USB_SIE_CTRL_EP0_INT_1BUF_BITS, (mm_reg_t)&base->sie_ctrl);
+ 
+ 	/* Enable interrupts */
++	/*
++	 * Keep the transient bus-error interrupts ENABLED.
++	 *
++	 * Masking them was tried and measured strictly worse: reattaches jumped
++	 * to 27 and climbing, with the port churning continuously. The reason
++	 * is that these handlers are not merely logging -- each one also calls
++	 * sie_status_clr() to acknowledge a write-1-to-clear latch. With the
++	 * interrupt masked the ISR is never entered for those errors, the
++	 * latches are never cleared, and SIE_STATUS accumulates them
++	 * permanently (observed: sie=c3851005, DATA_SEQ_ERROR and ACK_REC set
++	 * with the error counters reading zero because the ISR never ran).
++	 *
++	 * So the interrupt is load-bearing for latch hygiene even though the
++	 * handler performs no recovery. Any future attempt to reduce this
++	 * interrupt load must clear the latches by some other means -- polling
++	 * them from the driver thread, for example -- rather than simply
++	 * masking.
++	 *
++	 * Measured on this board: ~10 CRC errors per second sustained on a link
++	 * that is passing data normally. The protocol absorbs them (a corrupted
++	 * packet is not ACKed and the host retries, handled by the SIE in
++	 * hardware), so no software recovery is required or performed.
++	 */
+ 	sys_write32(IF_ENABLED(CONFIG_UDC_ENABLE_SOF, (USB_INTE_DEV_SOF_BITS |))
+ 		    USB_INTE_SETUP_REQ_BITS |
+ 		    USB_INTE_DEV_RESUME_FROM_HOST_BITS |
