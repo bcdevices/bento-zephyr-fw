@@ -165,14 +165,50 @@ static void wedge_report_thread(const struct k_thread *thread, void *user_data)
 	       (void *)thread->base.pended_on);
 }
 
+extern bool udc_rpi_pico_link_is_dead(const struct device *dev);
+extern void udc_rpi_pico_force_reattach(const struct device *dev);
+
 static void wedge_monitor(void *p1, void *p2, void *p3)
 {
+	int dump_div = 0;
+
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
 	while (1) {
-		k_msleep(5000);
+		k_msleep(500);
+
+		/*
+		 * Link-death recovery.
+		 *
+		 * Measured signature: an RX_TIMEOUT (the host did not ACK a
+		 * packet we sent) followed by SOFs stopping permanently. The
+		 * device is left in a perfectly valid state -- endpoints armed,
+		 * nothing halted, bookkeeping consistent with hardware -- but
+		 * the host has given up on it, and a device cannot initiate
+		 * traffic to fix that. Dropping the D+ pullup presents a
+		 * disconnect, which makes the host re-enumerate and rebuilds
+		 * both sides.
+		 *
+		 * Driven from here rather than from inside the USB stack so the
+		 * recovery is independent of the subsystem it is recovering.
+		 */
+		{
+			const struct device *udc =
+				DEVICE_DT_GET(DT_NODELABEL(usbd));
+
+			if (udc_rpi_pico_link_is_dead(udc)) {
+				printk("!! link dead (rx_timeout + no SOF), "
+				       "forcing re-attach\n");
+				udc_rpi_pico_force_reattach(udc);
+			}
+		}
+
+		if (++dump_div < 10) {
+			continue;
+		}
+		dump_div = 0;
 
 		printk("\n--- wedge monitor @ %lld ms ---\n", k_uptime_get());
 		printk("  susp=%u res=%u synth=%u synthS=%u false=%u both=%u sw_susp=%u hw_sie=%08x "
@@ -261,6 +297,10 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.snap_sof,
 			       udc_rpi_pico_susp_trace.out_halted,
 			       udc_rpi_pico_susp_trace.in_halted);
+			printk("  rxto=%u lastrxto=%u reattach=%u\n",
+			       udc_rpi_pico_susp_trace.rx_timeouts,
+			       udc_rpi_pico_susp_trace.last_rx_timeout_ms,
+			       udc_rpi_pico_susp_trace.reattaches);
 			printk("  sof_seen=%u last_sof_ms=%u now=%u (dead %u ms)\n",
 			       udc_rpi_pico_susp_trace.sof_seen,
 			       udc_rpi_pico_susp_trace.last_sof_ms,
