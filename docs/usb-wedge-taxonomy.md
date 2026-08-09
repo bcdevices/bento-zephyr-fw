@@ -319,6 +319,40 @@ notification-endpoint transactions failing**, not "1% of SOFs". The bus is
 never truly idle: the host polls that endpoint continuously, which is why the
 rate is flat whether or not the shell is doing anything.
 
+### Second board: the CRC rate is ~3x lower
+
+Same firmware, same cable, same host port, different Bento2 board:
+
+| Board | CRC/sec |
+|---|---|
+| Board 1 | 9.1 - 10.8 (four separate measurements) |
+| **Board 2** | **3.0** |
+
+This is the first variable that has moved the rate at all. Cable, host port and
+shell traffic load all left it unchanged; swapping the board cut it by roughly
+three times.
+
+**Preliminary -- a single ~15 s measurement on a freshly flashed board.** It has
+not been repeated, and the wedge behaviour on board 2 has not been
+characterised. But 3/sec is still far above the ~0 a healthy USB link should
+show, so the reading is not "board 1 is faulty and board 2 is fine": both boards
+show the fault, at different severities.
+
+That pattern -- present on both units, varying in degree -- points away from a
+single defective board and toward something common to the design or the part,
+with unit-to-unit variation. Board-level power integrity and the RP2350 itself
+both remain candidates.
+
+Next measurements, in order of value:
+1. Repeat the board 2 rate several times to confirm 3/sec is stable and not an
+   artifact of the fresh flash or a short window.
+2. Run the wedge test on board 2. If the wedge rate scales with the CRC rate,
+   that is strong evidence the errors drive the wedge rather than merely
+   accompanying it.
+3. Scope VBUS and the 3V3 rail on both boards during active transfer, looking
+   for droop or noise coincident with error bursts. This is the one candidate
+   class no software measurement can reach.
+
 ### What has NOT been established
 
 - Whether the CRC errors originate in the cable, connector, board, host port, or
