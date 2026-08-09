@@ -1,5 +1,5 @@
 diff --git i/subsys/usb/device_next/class/usbd_cdc_acm.c w/subsys/usb/device_next/class/usbd_cdc_acm.c
-index d3921c0f146..4c4b521814a 100644
+index d3921c0f146..f5f1fa12b36 100644
 --- i/subsys/usb/device_next/class/usbd_cdc_acm.c
 +++ w/subsys/usb/device_next/class/usbd_cdc_acm.c
 @@ -35,6 +35,26 @@
@@ -224,7 +224,49 @@ index d3921c0f146..4c4b521814a 100644
  	if (atomic_test_bit(&data->state, CDC_ACM_IRQ_TX_ENABLED)) {
  		if (ring_buf_space_get(data->tx_fifo.rb)) {
  			/* Raise TX ready interrupt */
-@@ -378,6 +521,11 @@ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
+@@ -369,6 +512,41 @@ static void usbd_cdc_acm_enable(struct usbd_class_data *const c_data)
+ 			cdc_acm_work_schedule(&data->tx_fifo_work, K_NO_WAIT);
+ 		}
+ 	}
++
++	/*
++	 * Drain any pending TX unconditionally -- the symmetric counterpart of
++	 * the RX priming above, and for the same reason.
++	 *
++	 * cdc_acm_tx_fifo_handler() is the only thing that moves bytes from
++	 * tx_fifo onto the IN endpoint, and every path that schedules it is
++	 * edge-triggered on an event that has already happened: a TX completion
++	 * (needs something in flight), a fresh fifo_fill (needs tx_fifo.altered,
++	 * which only a new write sets), a resume event, a poll_out, or the
++	 * IRQ_TX_ENABLED branch directly above. That branch does not help here:
++	 * when the fifo still has free space it takes the first arm and asks the
++	 * consumer for MORE data instead of sending what it already holds.
++	 *
++	 * After a re-enumeration with an idle shell every one of those is false
++	 * while tx_fifo holds data, and nothing will ever make one true again --
++	 * the shell is waiting for its own banner to drain before it prints
++	 * anything else. Measured as wedge Variant C in docs/usb-wedge-taxonomy.md:
++	 * state=0x15, tx_pending=25 (the 25-byte shell banner), tx enq=0 -- the
++	 * handler was never invoked once, so the port is silent for the session.
++	 *
++	 * This is level-triggered on the enumeration event, not on a timer: the
++	 * condition tested is the positive fact "tx_fifo is non-empty at the
++	 * moment a fresh configuration was established", evaluated exactly once
++	 * per SET_CONFIGURATION. It is not the idleness/timeout class of recovery
++	 * disproved in docs/usb-shell-investigation.md section 6, which fired on
++	 * an ABSENCE of activity during healthy idle periods and churned the port
++	 * continuously. Nothing here runs while the link is up and working.
++	 *
++	 * The handler re-tests CLASS_ENABLED, CLASS_SUSPENDED and TX_FIFO_BUSY at
++	 * its top, so scheduling it redundantly is a no-op.
++	 */
++	if (!ring_buf_is_empty(data->tx_fifo.rb)) {
++		cdc_acm_work_schedule(&data->tx_fifo_work, K_NO_WAIT);
++	}
+ }
+ 
+ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
+@@ -378,6 +556,11 @@ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
  
  	atomic_clear_bit(&data->state, CDC_ACM_CLASS_ENABLED);
  	atomic_clear_bit(&data->state, CDC_ACM_CLASS_SUSPENDED);
@@ -236,7 +278,7 @@ index d3921c0f146..4c4b521814a 100644
  	LOG_INF("Configuration disabled");
  }
  
-@@ -387,15 +535,67 @@ static void usbd_cdc_acm_suspended(struct usbd_class_data *const c_data)
+@@ -387,15 +570,67 @@ static void usbd_cdc_acm_suspended(struct usbd_class_data *const c_data)
  	struct cdc_acm_uart_data *data = dev->data;
  
  	/* FIXME: filter stray suspended events earlier */
@@ -304,7 +346,7 @@ index d3921c0f146..4c4b521814a 100644
  }
  
  static void *usbd_cdc_acm_get_desc(struct usbd_class_data *const c_data,
-@@ -663,11 +863,24 @@ static void cdc_acm_tx_fifo_handler(struct k_work *work)
+@@ -663,11 +898,24 @@ static void cdc_acm_tx_fifo_handler(struct k_work *work)
  
  	data->zlp_needed = len != 0 && len % cdc_acm_get_bulk_mps(c_data) == 0;
  
@@ -329,7 +371,7 @@ index d3921c0f146..4c4b521814a 100644
  	}
  }
  
-@@ -690,36 +903,56 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
+@@ -690,36 +938,56 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
  	data = CONTAINER_OF(work, struct cdc_acm_uart_data, rx_fifo_work);
  	cfg = data->dev->config;
  	c_data = cfg->c_data;

@@ -243,6 +243,224 @@ ZTEST(usb_state, test_tx_enqueue_failure_reschedules)
 		     "path does");
 }
 
+/*
+ * Wedge Variant C (docs/usb-wedge-taxonomy.md): state=0x15, tx_pending=25,
+ * tx enq=0 -- the shell's 25-byte banner sits in tx_fifo and
+ * cdc_acm_tx_fifo_handler() is never invoked once for the whole session.
+ *
+ * cdc_acm_tx_fifo_handler() is the ONLY thing that moves bytes from tx_fifo
+ * onto the IN endpoint, and every path that schedules it is edge-triggered on
+ * an event that has already happened. Enumerate them and the trap is visible:
+ * after a re-enumeration with an idle shell all of them are false while the
+ * fifo holds data, and no future event makes any of them true -- the shell is
+ * waiting for its own banner to drain before it prints anything more.
+ *
+ * The fix is the symmetric counterpart of the unconditional RX priming in
+ * usbd_cdc_acm_enable(): schedule tx_fifo_work whenever the fifo is non-empty
+ * at enable() time, NOT gated on IRQ_TX_ENABLED. The IRQ_TX_ENABLED branch
+ * does not cover it -- when the fifo has free space that branch raises a
+ * TX-ready interrupt asking the consumer for MORE data instead of sending
+ * what it already holds.
+ *
+ * This is level-triggered on the enumeration event, evaluated once per
+ * SET_CONFIGURATION. It is deliberately NOT the timer/idleness class of
+ * recovery disproved in docs/usb-shell-investigation.md section 6.
+ */
+
+/* The six sites that schedule tx_fifo_work, in source order. */
+struct tx_triggers {
+	bool completion_with_pending;	/* :428 TX completion, fifo non-empty */
+	bool enable_fifo_full;		/* :512 IRQ_TX_ENABLED && fifo full   */
+	bool resume_event;		/* :598 usbd_cdc_acm_resumed()        */
+	bool irq_cb_fifo_altered;	/* :1175 tx_fifo.altered              */
+	bool irq_cb_zlp_needed;		/* :1178 zlp_needed                   */
+	bool poll_out_new_byte;		/* :1251 cdc_acm_poll_out()           */
+};
+
+static bool tx_any_trigger(const struct tx_triggers *t)
+{
+	return t->completion_with_pending || t->enable_fifo_full ||
+	       t->resume_event || t->irq_cb_fifo_altered ||
+	       t->irq_cb_zlp_needed || t->poll_out_new_byte;
+}
+
+/*
+ * Model of usbd_cdc_acm_enable() plus the resulting state of the TX pump.
+ * tx_handler_ran mirrors the on-target "tx enq" counter.
+ */
+struct tx_enable_model {
+	uint32_t state;
+	int tx_pending;		/* bytes sitting in tx_fifo             */
+	int tx_fifo_capacity;
+	struct tx_triggers trig;
+	bool tx_handler_ran;
+	bool irq_cb_raised;	/* asked the consumer for MORE data     */
+};
+
+/* Mirrors cdc_acm_tx_fifo_handler()'s guards and its drain. */
+static void tx_pump(struct tx_enable_model *m)
+{
+	if (!(m->state & CLASS_ENABLED) || (m->state & CLASS_SUSPENDED)) {
+		return;
+	}
+	if (m->state & TX_FIFO_BUSY) {
+		return;
+	}
+	m->tx_handler_ran = true;
+	m->tx_pending = 0;
+}
+
+static void tx_enable(struct tx_enable_model *m, bool fixed)
+{
+	m->state |= CLASS_ENABLED;
+	m->state &= ~CLASS_SUSPENDED;
+	m->state &= ~(RX_FIFO_BUSY | TX_FIFO_BUSY);
+	/* zlp_needed is cleared here (usbd_cdc_acm.c:490). */
+	m->trig.irq_cb_zlp_needed = false;
+
+	if (m->state & IRQ_TX_ENABLED) {
+		if (m->tx_pending < m->tx_fifo_capacity) {
+			/* Free space: raises a TX-ready interrupt asking the
+			 * shell for MORE, rather than draining what is held.
+			 */
+			m->irq_cb_raised = true;
+		} else {
+			m->trig.enable_fifo_full = true;
+			tx_pump(m);
+		}
+	}
+
+	if (fixed && m->tx_pending > 0) {
+		tx_pump(m);
+	}
+}
+
+ZTEST(usb_state, test_enable_drains_pending_tx_without_irq_tx_enabled)
+{
+	/* Post-re-enumeration state at the moment enable() runs: the shell's
+	 * 25-byte banner is queued, the fifo is far from full, and the shell
+	 * has nothing further to print until that banner drains.
+	 */
+	struct tx_enable_model buggy = {
+		.state = IRQ_RX_ENABLED | IRQ_TX_ENABLED,
+		.tx_pending = 25, .tx_fifo_capacity = 512,
+	};
+	struct tx_enable_model fixed = {
+		.state = IRQ_RX_ENABLED | IRQ_TX_ENABLED,
+		.tx_pending = 25, .tx_fifo_capacity = 512,
+	};
+
+	tx_enable(&buggy, false);
+	tx_enable(&fixed, true);
+
+	zassert_false(buggy.tx_handler_ran,
+		      "wedge Variant C: enable() takes the fifo-has-space arm "
+		      "and raises a TX-ready interrupt asking the shell for "
+		      "MORE data, so cdc_acm_tx_fifo_handler() is never "
+		      "invoked and the queued banner is never sent (tx enq=0, "
+		      "tx_pending stuck at 25)");
+	zassert_equal(buggy.tx_pending, 25,
+		      "the banner stays in tx_fifo for the whole session");
+
+	zassert_true(fixed.tx_handler_ran,
+		     "enable() must drain a non-empty tx_fifo unconditionally, "
+		     "as the symmetric RX priming does");
+	zassert_equal(fixed.tx_pending, 0, "the queued banner must be sent");
+}
+
+/*
+ * The same trap with IRQ_TX_ENABLED clear: the shell has not attached yet, so
+ * the flag is false and the gated branch is skipped entirely. IRQ_TX_ENABLED
+ * is set once by the consumer and never re-set, so gating on it is exactly the
+ * failure mode already fixed on the RX side.
+ */
+ZTEST(usb_state, test_enable_drains_pending_tx_before_consumer_attaches)
+{
+	struct tx_enable_model buggy = {
+		.state = 0, .tx_pending = 25, .tx_fifo_capacity = 512,
+	};
+	struct tx_enable_model fixed = {
+		.state = 0, .tx_pending = 25, .tx_fifo_capacity = 512,
+	};
+
+	tx_enable(&buggy, false);
+	tx_enable(&fixed, true);
+
+	zassert_false(buggy.tx_handler_ran,
+		      "with IRQ_TX_ENABLED clear the gated branch is skipped "
+		      "entirely, so nothing drains tx_fifo");
+	zassert_true(fixed.tx_handler_ran,
+		     "the drain must not be gated on IRQ_TX_ENABLED, which the "
+		     "consumer sets once and never re-sets");
+}
+
+/* Scheduling the pump redundantly must be harmless: the handler re-tests its
+ * own guards, so a live transfer is not disturbed and a suspended or disabled
+ * class does not transmit.
+ */
+ZTEST(usb_state, test_redundant_tx_pump_schedule_is_a_no_op)
+{
+	struct tx_enable_model busy = {
+		.state = CLASS_ENABLED | TX_FIFO_BUSY,
+		.tx_pending = 25, .tx_fifo_capacity = 512,
+	};
+	struct tx_enable_model susp = {
+		.state = CLASS_ENABLED | CLASS_SUSPENDED,
+		.tx_pending = 25, .tx_fifo_capacity = 512,
+	};
+
+	tx_pump(&busy);
+	zassert_false(busy.tx_handler_ran,
+		      "TX_FIFO_BUSY must still block the pump; the fix must "
+		      "not break the single-outstanding-transfer invariant");
+
+	tx_pump(&susp);
+	zassert_false(susp.tx_handler_ran,
+		      "a suspended class must not transmit");
+}
+
+/*
+ * The trigger map itself, as an assertion. Whatever the six edge-triggered
+ * sites do individually, the driver must never be able to sit with data in
+ * tx_fifo and every one of them false -- that state is unrecoverable, because
+ * only those sites can start the pump.
+ */
+ZTEST(usb_state, test_tx_trigger_map_cannot_be_all_false_with_pending_data)
+{
+	/* Exactly the post-re-enumeration, idle-shell situation. */
+	struct tx_triggers idle_after_reenum = {
+		.completion_with_pending = false, /* nothing in flight       */
+		.enable_fifo_full = false,	  /* fifo has free space     */
+		.resume_event = false,		  /* no suspend/resume came  */
+		.irq_cb_fifo_altered = false,	  /* no fresh fifo_fill      */
+		.irq_cb_zlp_needed = false,	  /* cleared at enable()     */
+		.poll_out_new_byte = false,	  /* shell has nothing more  */
+	};
+	int tx_pending = 25;
+
+	zassert_true(tx_pending > 0, "the banner is queued");
+	zassert_false(tx_any_trigger(&idle_after_reenum),
+		      "all six schedule sites for cdc_acm_tx_fifo_handler() "
+		      "are false after a re-enumeration with an idle shell -- "
+		      "this is wedge Variant C and it is permanent");
+
+	/*
+	 * The fix adds a seventh, level-triggered on the enumeration event:
+	 * tx_fifo non-empty at enable(). With it, the all-false state above is
+	 * no longer reachable while data is pending.
+	 */
+	struct tx_triggers with_fix = idle_after_reenum;
+
+	with_fix.enable_fifo_full = (tx_pending > 0); /* now ungated by
+						       * IRQ_TX_ENABLED and by
+						       * fifo fullness
+						       */
+
+	zassert_true(tx_any_trigger(&with_fix),
+		     "at least one trigger must be true whenever tx_fifo is "
+		     "non-empty, or queued output can never be sent");
+}
+
 /* ---- Model of the ch9 enumeration state machine ---- */
 
 enum ch9_state { ST_DEFAULT = 0, ST_ADDRESS = 2, ST_CONFIGURED = 4 };
