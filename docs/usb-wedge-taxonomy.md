@@ -255,6 +255,70 @@ routing/termination, host port, or the RP2350 SIE itself. Distinguishing them
 needs either a swap test (different cable, port, host) or an instrument
 (oscilloscope on the differential pair, or a protocol analyser).
 
+### Swap test: cable and port make no difference
+
+Section 5 of `usb-shell-investigation.md` eliminated host/port/cable topology,
+but did so while the CRC counts were believed to be a write-1-to-clear
+artifact. Redone now that the errors are known to be real:
+
+| Configuration | CRC/sec |
+|---|---|
+| Original cable, original port | 9.6 / 10.8 / 9.1 |
+| **Different cable, different port** | **9.1** |
+
+Unchanged. The rate is the same across two cables and two ports on the same
+host, and the wedge still reproduces (with the forced-reattach recovery firing
+and restoring the port).
+
+One intermediate cable produced a harder failure worth recording: the device
+did not enumerate at all, and `SIE_STATUS` read `0x0000000D` --
+`VBUS_DETECTED=1`, `CONNECTED=0`, and **`LINE_STATE=3` (SE1, both D+ and D-
+high)**, while `SIE_CTRL=0x20010000` showed the firmware had `PULLUP_EN` set
+and the transceiver powered. SE1 is an illegal USB line state that never occurs
+in normal signalling. That cable was faulty; replacing it restored enumeration.
+It is noted here because it demonstrates the register signature of a genuinely
+broken physical link, which is clearly distinguishable from the normal wedge --
+and the normal wedge does NOT show it.
+
+So the sustained ~9-10 CRC errors/second are not attributable to the cable or
+the host port. Combined with the traffic-independence result above, that leaves
+the board (routing, termination, connector, power integrity) or the RP2350
+itself.
+
+### Ruled out on the board and in the clock tree
+
+Checked against the KiCad sources in `example-projects/bento-board-2` and the
+build configuration:
+
+| Candidate | Finding |
+|---|---|
+| D+/D- length matching | 31.43 mm vs 31.31 mm -- **0.12 mm skew**, excellent |
+| Trace width | 0.175 mm uniform, no necking |
+| Vias on the pair | one per leg, adjacent and symmetric |
+| Series termination | 27 ohm +/-1% (R4/R5), required by the RP2350 datasheet |
+| Crystal | 12 MHz +/-10 ppm, XOSC-sourced -- inside USB's +/-2500 ppm budget |
+| Crystal load caps | 12 pF C0G on a 10 pF-load crystal; CL ~8-11 pF, pulls tens of ppm |
+| **RP2350-E12** (clk_sys must exceed clk_usb by >=10%) | **Not applicable**: clk_sys 150 MHz vs clk_usb 48 MHz, a 3.1x margin |
+| clk_usb source | `pll_usb` <- `xosc`, not ROSC -- rules out oscillator-accuracy drift |
+
+### Error attribution: not SOFs
+
+The errors are attributable to real endpoint transactions, not to frame
+markers. Sampled at the CRC interrupt:
+
+```
+rxerr=00000001  -> EP0 OUT, TRANSACTION error
+txerr=0000000c  -> EP1 IN, TRANSACTION + SEQ errors
+```
+
+EP1 IN is the CDC notification endpoint, polled every 10 ms (`bInterval=10`),
+so ~100 polls/second. SOF packets are token-only -- no data payload and no
+CRC16 -- so they cannot generate CRC errors at all. The correct reading of the
+rate is therefore **~10 errors per ~100 interrupt-IN polls, i.e. roughly 10% of
+notification-endpoint transactions failing**, not "1% of SOFs". The bus is
+never truly idle: the host polls that endpoint continuously, which is why the
+rate is flat whether or not the shell is doing anything.
+
 ### What has NOT been established
 
 - Whether the CRC errors originate in the cable, connector, board, host port, or

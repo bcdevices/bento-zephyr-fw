@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..d8f744c6d78 100644
+index b0fb2fcf44f..9fadaa5c7c9 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,34 @@
@@ -760,15 +760,35 @@ index b0fb2fcf44f..d8f744c6d78 100644
  
  		LOG_ERR("Bit Stuff Error");
  		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
-@@ -792,6 +1303,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -792,6 +1303,27 @@ static void rpi_pico_isr_handler(const struct device *dev)
  	if (status & USB_INTS_ERROR_CRC_BITS) {
  		handled |= USB_INTS_ERROR_CRC_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_CRC_ERROR_BITS);
 +		udc_rpi_pico_susp_trace.crc_errors++;
++		/*
++		 * Which endpoint was the SIE working on? EP_TX_ERROR /
++		 * EP_RX_ERROR carry 2 bits per endpoint (TRANSACTION at 2n, SEQ
++		 * at 2n+1), and SIE_CTRL's endpoint field says what the
++		 * controller last addressed. Sampling these at the CRC lets us
++		 * attribute the errors -- an idle bus still carries SOFs at
++		 * 1000/s and the CDC notification endpoint poll at 100/s, so
++		 * ~10 errors/s could be ~1% of SOFs or ~10% of int-IN polls,
++		 * which are very different diagnoses.
++		 */
++		if (udc_rpi_pico_susp_trace.crc_errors < 4000) {
++			udc_rpi_pico_susp_trace.crc_ep_rx_err =
++				sys_read32((mm_reg_t)&base->ep_rx_error);
++			udc_rpi_pico_susp_trace.crc_ep_tx_err =
++				sys_read32((mm_reg_t)&base->ep_tx_error);
++			udc_rpi_pico_susp_trace.crc_sie_ctrl =
++				sys_read32((mm_reg_t)&base->sie_ctrl);
++			udc_rpi_pico_susp_trace.crc_buf_status =
++				sys_read32((mm_reg_t)&base->buf_status);
++		}
  
  		LOG_ERR("CRC Error");
  		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
-@@ -812,6 +1324,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -812,6 +1344,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_SETUP_REQ_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
  
@@ -776,7 +796,7 @@ index b0fb2fcf44f..d8f744c6d78 100644
  		rpi_pico_handle_setup(dev);
  	}
  
-@@ -975,6 +1488,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
+@@ -975,6 +1508,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
  		/* Cancel responds with a STALL handshake.*/
  		rpi_pico_ep_cancel(dev, cfg->addr);
  	} else {
@@ -807,7 +827,7 @@ index b0fb2fcf44f..d8f744c6d78 100644
  		rpi_pico_bit_clr(buf_ctrl_reg, USB_BUF_CTRL_STALL);
  	}
  
-@@ -1064,6 +1601,29 @@ static int udc_rpi_pico_enable(const struct device *dev)
+@@ -1064,6 +1621,29 @@ static int udc_rpi_pico_enable(const struct device *dev)
  	sys_write32(USB_SIE_CTRL_EP0_INT_1BUF_BITS, (mm_reg_t)&base->sie_ctrl);
  
  	/* Enable interrupts */
