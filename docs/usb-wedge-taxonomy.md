@@ -55,9 +55,16 @@ sending, and no completion arrives.
 Distinguishing marks:
 - `cdc state=15` with `tx_pending=0`
 - `tx enq == tx done`
-- **`bs > armed`** (50 vs 49): the controller dispatched a completion for a
-  buffer the driver never armed. A hardware-level accounting inversion, not a
-  software drop.
+- `recon IN sw=0 hw=0 q=0` -- the IN endpoint is genuinely idle
+
+**Correction.** An earlier revision of this document called `bs > armed` (50 vs
+49) "a hardware-level accounting inversion". That was wrong and it steered the
+investigation toward the silicon. It is an instrumentation artifact: `in_armed`
+increments only in `rpi_pico_handle_xfer_next()`, while `in_bs` increments on
+every BUFF_STATUS dispatch -- including the ZLP/continuation packet armed from
+*inside* `rpi_pico_handle_buff_status_in()`, which never touches `in_armed`.
+Both counters also cover all IN endpoints, not just bulk. Do not read `bs`
+against `armed` as a hardware signal.
 
 ## Variant C -- startup failure, banner never sent
 
@@ -122,6 +129,42 @@ Each was instrumented on hardware and the counter came back zero.
 | Enqueue onto a halted endpoint | `enq_halted=0` |
 | Abort-handshake timeout stranding a transfer | `abort_to=0` |
 | The enqueued/completed skew of one indicates a lost transfer | Variant D shows the same skew while fully healthy |
+
+## The decisive measurement: software and hardware agree
+
+A reconciliation snapshot compares the cached `stat.busy` bit against the
+controller's `buf_ctrl.AVAILABLE` for both bulk endpoints, plus whether a buffer
+is queued. Measured across six fresh flashes:
+
+| Outcome | `recon OUT` | `recon IN` |
+|---|---|---|
+| survived | `sw=1 hw=1 q=1` | `sw=0 hw=0 q=0` |
+| A (state=35) | `sw=1 hw=1 q=1` | `sw=1 hw=1 q=1` |
+| B (state=15) | `sw=1 hw=1 q=1` | `sw=0 hw=0 q=0` |
+
+**`sw` never disagrees with `hw`, in any variant or in the healthy case.** The
+firmware's bookkeeping is correct. This kills the "lost completion" framing that
+drove most of this investigation:
+
+- In **variant A** the IN endpoint is *still armed in hardware* (`hw=1`) with a
+  buffer queued. The transfer was never completed because the **host stopped
+  IN-polling the endpoint**. Nothing was dropped device-side.
+- In **variant B** the IN endpoint is idle and TX is balanced; the device has
+  nothing to send and the host is not sending either.
+- `recon OUT sw=1 hw=1 q=1` appears in the healthy case too -- an armed OUT
+  endpoint waiting for the user to type is the normal resting state.
+
+A consequence worth stating plainly: a device-side watchdog that reconciles
+`stat.busy` against `AVAILABLE` cannot fix these wedges, because the two already
+agree. The problem is on the wire or at the host, not in the driver's memory.
+
+## Also disproved by direct measurement
+
+| Hypothesis | Killed by |
+|---|---|
+| `usbd_msgq` overflow silently dropping completions (`k_msgq_put` is `K_NO_WAIT`, depth 10, return discarded everywhere) | `msgq drops=0`, `hiwater=1` -- the queue never held more than one event |
+| RX throttle (`rx_fifo` too full to arm) leaving RX unarmed with no re-arm path | `throttle=0` -- the path never executes |
+| `stat.busy` diverging from hardware `AVAILABLE` | `sw == hw` in every sample, wedged and healthy |
 
 ## The unifying observation
 

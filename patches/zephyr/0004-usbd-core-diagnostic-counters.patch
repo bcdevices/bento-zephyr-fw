@@ -1,8 +1,55 @@
 diff --git i/subsys/usb/device_next/usbd_core.c w/subsys/usb/device_next/usbd_core.c
-index 9f24530fc2c..ef8e2d6d868 100644
+index 9f24530fc2c..6a2f5adc2b1 100644
 --- i/subsys/usb/device_next/usbd_core.c
 +++ w/subsys/usb/device_next/usbd_core.c
-@@ -59,21 +59,47 @@ static int event_handler_ep_request(struct usbd_context *const uds_ctx,
+@@ -31,10 +31,45 @@ static struct k_thread usbd_thread_data;
+ K_MSGQ_DEFINE(usbd_msgq, sizeof(struct udc_event),
+ 	      CONFIG_USBD_MAX_UDC_MSG, sizeof(uint32_t));
+ 
++/*
++ * Event-queue drop diagnostics.
++ *
++ * usbd_msgq is CONFIG_USBD_MAX_UDC_MSG deep (default 10) and this put is
++ * K_NO_WAIT, so on overflow the event is DESTROYED and -ENOMSG returned. Every
++ * caller discards that return: udc_submit_ep_event()/udc_submit_event() pass it
++ * up, and all of the driver's call sites ignore it.
++ *
++ * A dropped UDC_EVT_EP_REQUEST is unrecoverable state corruption, not
++ * backpressure: the completion never reaches the class driver, so nothing
++ * clears CDC_ACM_*_FIFO_BUSY, and every re-arm path is gated on that flag.
++ * The endpoint is dead with no counter anywhere recording why -- which is
++ * exactly the shape of the observed wedges.
++ *
++ * Counted here to establish whether this actually occurs before designing
++ * around it.
++ */
++uint32_t usbd_core_msgq_drops;
++uint32_t usbd_core_msgq_drop_type;
++uint32_t usbd_core_msgq_hiwater;
++
+ static int usbd_event_carrier(const struct device *dev,
+ 			      const struct udc_event *const event)
+ {
+-	return k_msgq_put(&usbd_msgq, event, K_NO_WAIT);
++	uint32_t used;
++	int ret;
++
++	ret = k_msgq_put(&usbd_msgq, event, K_NO_WAIT);
++	if (ret != 0) {
++		usbd_core_msgq_drops++;
++		usbd_core_msgq_drop_type = (uint32_t)event->type;
++	}
++
++	used = (uint32_t)k_msgq_num_used_get(&usbd_msgq);
++	if (used > usbd_core_msgq_hiwater) {
++		usbd_core_msgq_hiwater = used;
++	}
++
++	return ret;
+ }
+ 
+ static int event_handler_ep_request(struct usbd_context *const uds_ctx,
+@@ -59,21 +94,47 @@ static int event_handler_ep_request(struct usbd_context *const uds_ctx,
  	return ret;
  }
  
@@ -54,7 +101,7 @@ index 9f24530fc2c..ef8e2d6d868 100644
  
  	SYS_SLIST_FOR_EACH_CONTAINER(&cfg_nd->class_list, c_nd, node) {
  		switch (event->type) {
-@@ -95,7 +121,7 @@ static void usbd_class_bcast_event(struct usbd_context *const uds_ctx,
+@@ -95,7 +156,7 @@ static void usbd_class_bcast_event(struct usbd_context *const uds_ctx,
  static int event_handler_bus_reset(struct usbd_context *const uds_ctx)
  {
  	enum udc_bus_speed udc_speed;
@@ -63,7 +110,7 @@ index 9f24530fc2c..ef8e2d6d868 100644
  
  	usbd_status_suspended(uds_ctx, false);
  	ret = udc_set_address(uds_ctx->dev, 0);
-@@ -104,10 +130,25 @@ static int event_handler_bus_reset(struct usbd_context *const uds_ctx)
+@@ -104,10 +165,25 @@ static int event_handler_bus_reset(struct usbd_context *const uds_ctx)
  		return ret;
  	}
  
@@ -92,7 +139,7 @@ index 9f24530fc2c..ef8e2d6d868 100644
  	}
  
  	/* There might be pending data stage transfer */
-@@ -127,9 +168,32 @@ static int event_handler_bus_reset(struct usbd_context *const uds_ctx)
+@@ -127,9 +203,32 @@ static int event_handler_bus_reset(struct usbd_context *const uds_ctx)
  
  	uds_ctx->ch9_data.state = USBD_STATE_DEFAULT;
  
@@ -126,7 +173,7 @@ index 9f24530fc2c..ef8e2d6d868 100644
  }
  
  
-@@ -148,12 +212,14 @@ static ALWAYS_INLINE void usbd_event_handler(struct usbd_context *const uds_ctx,
+@@ -148,12 +247,14 @@ static ALWAYS_INLINE void usbd_event_handler(struct usbd_context *const uds_ctx,
  		usbd_msg_pub_simple(uds_ctx, USBD_MSG_VBUS_READY, 0);
  		break;
  	case UDC_EVT_SUSPEND:

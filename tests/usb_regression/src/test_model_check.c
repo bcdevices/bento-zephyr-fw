@@ -1604,8 +1604,10 @@ ZTEST(usb_model_check, test_finding_success_path_ignores_claim)
 
 	/* The same exploration with the candidate fix applied. */
 	mc_clear_bugs();
+	mc_suppress_lost_completions = true;
 	mc_fix_success_path_checks_claim = true;
 	mc_explore(MC_DEPTH, &fixed);
+	mc_suppress_lost_completions = false;
 	mc_clear_bugs();
 
 	printf("    with the success path guarded by the claim comparison: "

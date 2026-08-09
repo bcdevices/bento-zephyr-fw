@@ -123,9 +123,16 @@ extern uint32_t usbd_cdc_acm_rx_enq;
 extern uint32_t usbd_cdc_acm_rx_done;
 extern uint32_t usbd_cdc_acm_rx_err;
 extern uint32_t usbd_cdc_acm_last_req_err;
+extern uint32_t usbd_cdc_acm_rx_throttle;
+extern uint32_t usbd_cdc_acm_rx_notenabled;
+extern uint32_t usbd_cdc_acm_rx_alreadybusy;
+extern uint32_t usbd_cdc_acm_rx_work_runs;
 extern uint32_t usbd_cdc_acm_tx_enq;
 extern uint32_t usbd_cdc_acm_tx_done;
 extern uint32_t usbd_cdc_acm_tx_claim_miss;
+extern uint32_t usbd_core_msgq_drops;
+extern uint32_t usbd_core_msgq_drop_type;
+extern uint32_t usbd_core_msgq_hiwater;
 extern uint32_t usbd_core_evt_susp;
 extern uint32_t usbd_core_evt_res;
 extern uint32_t usbd_core_bcast_blocked;
@@ -226,6 +233,30 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.out_arm_pid,
 			       udc_rpi_pico_susp_trace.out_last_bufctrl,
 			       udc_rpi_pico_susp_trace.seq_errors);
+			{
+				const struct device *udc =
+					DEVICE_DT_GET(DT_NODELABEL(usbd));
+				extern void udc_rpi_pico_reconcile_snapshot(
+					const struct device *dev);
+				udc_rpi_pico_reconcile_snapshot(udc);
+			}
+			printk("  recon OUT sw=%u hw=%u q=%u | IN sw=%u hw=%u "
+			       "q=%u\n",
+			       udc_rpi_pico_susp_trace.out_sw_busy,
+			       udc_rpi_pico_susp_trace.out_hw_avail,
+			       udc_rpi_pico_susp_trace.out_queued,
+			       udc_rpi_pico_susp_trace.in_sw_busy,
+			       udc_rpi_pico_susp_trace.in_hw_avail,
+			       udc_rpi_pico_susp_trace.in_queued);
+			printk("  rxwork runs=%u throttle=%u noten=%u busy=%u\n",
+			       usbd_cdc_acm_rx_work_runs,
+			       usbd_cdc_acm_rx_throttle,
+			       usbd_cdc_acm_rx_notenabled,
+			       usbd_cdc_acm_rx_alreadybusy);
+			printk("  msgq drops=%u type=%u hiwater=%u\n",
+			       usbd_core_msgq_drops,
+			       usbd_core_msgq_drop_type,
+			       usbd_core_msgq_hiwater);
 			printk("  isr=%u bsirq=%u bscalls=%u bsempty=%u "
 			       "bsword=%08x\n",
 			       udc_rpi_pico_susp_trace.isr_count,

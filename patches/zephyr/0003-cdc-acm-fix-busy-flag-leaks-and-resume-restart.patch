@@ -1,8 +1,8 @@
 diff --git i/subsys/usb/device_next/class/usbd_cdc_acm.c w/subsys/usb/device_next/class/usbd_cdc_acm.c
-index d3921c0f146..029c2026729 100644
+index d3921c0f146..4c4b521814a 100644
 --- i/subsys/usb/device_next/class/usbd_cdc_acm.c
 +++ w/subsys/usb/device_next/class/usbd_cdc_acm.c
-@@ -35,6 +35,18 @@
+@@ -35,6 +35,26 @@
  #endif
  LOG_MODULE_REGISTER(usbd_cdc_acm, CONFIG_USBD_CDC_ACM_LOG_LEVEL);
  
@@ -17,11 +17,19 @@ index d3921c0f146..029c2026729 100644
 +uint32_t usbd_cdc_acm_tx_enq;
 +uint32_t usbd_cdc_acm_tx_done;
 +uint32_t usbd_cdc_acm_tx_claim_miss;
++/*
++ * Early returns in cdc_acm_rx_fifo_handler(). Each leaves RX unarmed; the
++ * question is whether anything is guaranteed to schedule the handler again.
++ */
++uint32_t usbd_cdc_acm_rx_throttle;	/* rx_fifo too full to arm */
++uint32_t usbd_cdc_acm_rx_notenabled;	/* class disabled or suspended */
++uint32_t usbd_cdc_acm_rx_alreadybusy;	/* test-and-set found it claimed */
++uint32_t usbd_cdc_acm_rx_work_runs;
 +
  #define CDC_ACM_DEFAULT_LINECODING	{sys_cpu_to_le32(115200), 0, 0, 8}
  #define CDC_ACM_DEFAULT_INT_EP_MPS	16
  #define CDC_ACM_INTERVAL_DEFAULT	10000UL
-@@ -122,6 +134,16 @@ struct cdc_acm_uart_data {
+@@ -122,6 +142,16 @@ struct cdc_acm_uart_data {
  	struct k_work_delayable tx_fifo_work;
  	/* USBD CDC ACM RX fifo work */
  	struct k_work rx_fifo_work;
@@ -38,7 +46,7 @@ index d3921c0f146..029c2026729 100644
  	atomic_t state;
  	struct k_sem notif_sem;
  	struct k_spinlock lock;
-@@ -280,6 +302,14 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+@@ -280,6 +310,14 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
  	struct udc_buf_info *bi;
  
  	bi = udc_get_buf_info(buf);
@@ -53,7 +61,7 @@ index d3921c0f146..029c2026729 100644
  	if (err) {
  		if (err == -ECONNABORTED) {
  			LOG_WRN("request ep 0x%02x, len %u cancelled",
-@@ -289,16 +319,51 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+@@ -289,16 +327,51 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
  				bi->ep, buf->len);
  		}
  
@@ -107,7 +115,7 @@ index d3921c0f146..029c2026729 100644
  		}
  
  		goto ep_request_error;
-@@ -314,21 +379,47 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+@@ -314,21 +387,47 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
  			cdc_acm_work_submit(&data->irq_cb_work);
  		}
  
@@ -161,7 +169,7 @@ index d3921c0f146..029c2026729 100644
  		}
  
  	}
-@@ -356,10 +447,54 @@ static void usbd_cdc_acm_enable(struct usbd_class_data *const c_data)
+@@ -356,10 +455,54 @@ static void usbd_cdc_acm_enable(struct usbd_class_data *const c_data)
  	atomic_set_bit(&data->state, CDC_ACM_CLASS_ENABLED);
  	LOG_INF("Configuration enabled");
  
@@ -216,7 +224,7 @@ index d3921c0f146..029c2026729 100644
  	if (atomic_test_bit(&data->state, CDC_ACM_IRQ_TX_ENABLED)) {
  		if (ring_buf_space_get(data->tx_fifo.rb)) {
  			/* Raise TX ready interrupt */
-@@ -378,6 +513,11 @@ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
+@@ -378,6 +521,11 @@ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
  
  	atomic_clear_bit(&data->state, CDC_ACM_CLASS_ENABLED);
  	atomic_clear_bit(&data->state, CDC_ACM_CLASS_SUSPENDED);
@@ -228,7 +236,7 @@ index d3921c0f146..029c2026729 100644
  	LOG_INF("Configuration disabled");
  }
  
-@@ -387,15 +527,67 @@ static void usbd_cdc_acm_suspended(struct usbd_class_data *const c_data)
+@@ -387,15 +535,67 @@ static void usbd_cdc_acm_suspended(struct usbd_class_data *const c_data)
  	struct cdc_acm_uart_data *data = dev->data;
  
  	/* FIXME: filter stray suspended events earlier */
@@ -296,7 +304,7 @@ index d3921c0f146..029c2026729 100644
  }
  
  static void *usbd_cdc_acm_get_desc(struct usbd_class_data *const c_data,
-@@ -663,11 +855,24 @@ static void cdc_acm_tx_fifo_handler(struct k_work *work)
+@@ -663,11 +863,24 @@ static void cdc_acm_tx_fifo_handler(struct k_work *work)
  
  	data->zlp_needed = len != 0 && len % cdc_acm_get_bulk_mps(c_data) == 0;
  
@@ -321,15 +329,31 @@ index d3921c0f146..029c2026729 100644
  	}
  }
  
-@@ -702,6 +907,7 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
+@@ -690,36 +903,56 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
+ 	data = CONTAINER_OF(work, struct cdc_acm_uart_data, rx_fifo_work);
+ 	cfg = data->dev->config;
+ 	c_data = cfg->c_data;
++	usbd_cdc_acm_rx_work_runs++;
+ 
+ 	if (!atomic_test_bit(&data->state, CDC_ACM_CLASS_ENABLED) ||
+ 	    atomic_test_bit(&data->state, CDC_ACM_CLASS_SUSPENDED)) {
++		usbd_cdc_acm_rx_notenabled++;
+ 		LOG_INF("USB configuration is not enabled or suspended");
+ 		return;
+ 	}
+ 
+ 	if (ring_buf_space_get(data->rx_fifo.rb) < cdc_acm_get_bulk_mps(c_data)) {
++		usbd_cdc_acm_rx_throttle++;
+ 		LOG_INF("RX buffer to small, throttle");
  		return;
  	}
  
 +	usbd_cdc_acm_rxbusy_sets++;
  	if (atomic_test_and_set_bit(&data->state, CDC_ACM_RX_FIFO_BUSY)) {
++		usbd_cdc_acm_rx_alreadybusy++;
  		LOG_WRN("RX transfer already in progress");
  		return;
-@@ -709,17 +915,32 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
+ 	}
  
  	buf = cdc_acm_buf_alloc(c_data, cdc_acm_get_bulk_out(c_data));
  	if (buf == NULL) {
