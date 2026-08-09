@@ -202,6 +202,16 @@ enum mc_event {
 	MC_EV_SHELL_READ,	/* cdc_acm_fifo_read */
 	MC_EV_IRQ_RX_ENABLE,
 	MC_EV_DELIVER,		/* usbd thread drains one deferred event */
+	/*
+	 * The controller silently drops an armed transfer: the buffer is
+	 * consumed but no BUFF_STATUS is raised, so no completion is ever
+	 * delivered. Every wedge variant observed on hardware has this shape
+	 * (see docs/usb-wedge-taxonomy.md) and no root cause for it has been
+	 * established -- so the model must treat it as possible rather than
+	 * assume every armed transfer completes.
+	 */
+	MC_EV_RX_LOST,
+	MC_EV_TX_LOST,
 	MC_EV_COUNT,
 };
 
@@ -225,6 +235,8 @@ static const char *const mc_event_name[MC_EV_COUNT] = {
 	[MC_EV_SHELL_READ] = "shell_read",
 	[MC_EV_IRQ_RX_ENABLE] = "irq_rx_enable",
 	[MC_EV_DELIVER] = "deliver_queued_event",
+	[MC_EV_RX_LOST] = "rx_completion_LOST(controller)",
+	[MC_EV_TX_LOST] = "tx_completion_LOST(controller)",
 };
 
 /*
@@ -740,8 +752,15 @@ static void mc_tx_complete(struct mc_state *s)
  * scheduled, and the controller cannot complete a transfer that was never
  * queued.
  */
+static bool mc_suppress_lost_completions;
+
 static bool mc_enabled(const struct mc_state *s, enum mc_event ev)
 {
+	if (mc_suppress_lost_completions &&
+	    (ev == MC_EV_RX_LOST || ev == MC_EV_TX_LOST)) {
+		return false;
+	}
+
 	switch (ev) {
 	case MC_EV_RX_WORK:
 	case MC_EV_RX_WORK_ALLOC_FAIL:
@@ -754,8 +773,10 @@ static bool mc_enabled(const struct mc_state *s, enum mc_event ev)
 	case MC_EV_IRQ_CB:
 		return s->irq_work != 0;
 	case MC_EV_RX_COMPLETE:
+	case MC_EV_RX_LOST:
 		return s->rx_out > 0;
 	case MC_EV_TX_COMPLETE:
+	case MC_EV_TX_LOST:
 		return s->tx_out > 0;
 	case MC_EV_DELIVER:
 		return s->pendq_len > 0;
@@ -812,6 +833,17 @@ static void mc_apply(struct mc_state *s, enum mc_event ev)
 		break;
 	case MC_EV_TX_COMPLETE:
 		mc_tx_complete(s);
+		break;
+	case MC_EV_RX_LOST:
+		/*
+		 * The controller consumed the arm and raised nothing. The
+		 * outstanding count drops but no completion is queued, so
+		 * nothing will ever clear RX_FIFO_BUSY or release rx_claim.
+		 */
+		s->rx_out--;
+		break;
+	case MC_EV_TX_LOST:
+		s->tx_out--;
 		break;
 	case MC_EV_IRQ_CB:
 		mc_irq_cb(s);
@@ -1282,6 +1314,47 @@ static void mc_explore(int max_depth, struct mc_result *r)
  * States at the depth frontier are excluded: their successors were never
  * expanded, so "cannot reach working" is an artifact of the bound, not a trap.
  */
+/*
+ * Events the device can produce on its own, without host intervention.
+ * See the closure in mc_check_traps() for why this filter exists.
+ */
+static bool mc_strict_self_recovery;
+
+static bool mc_self_recovery_event(enum mc_event ev)
+{
+	if (mc_strict_self_recovery) {
+		switch (ev) {
+		case MC_EV_BUS_RESET:
+		case MC_EV_SET_CONFIG_ZERO:
+		case MC_EV_SET_ADDRESS:
+		case MC_EV_SET_CONFIGURATION:
+			return false;
+		default:
+			return true;
+		}
+	}
+
+	switch (ev) {
+	/*
+	 * A bus reset or a teardown to the unconfigured state clears the busy
+	 * flags via disable()/enable(). On hardware those mean the host
+	 * re-enumerated the device -- in practice, the user unplugged it. That
+	 * is the outcome a wedge forces, so counting it as recovery would make
+	 * every state trivially "recoverable" and the invariant vacuous.
+	 *
+	 * SET_ADDRESS and SET_CONFIGURATION(1) are NOT excluded: they are how a
+	 * device legitimately reaches a working configuration in the first
+	 * place, and excluding them would mark the initial unconfigured state
+	 * itself as a trap.
+	 */
+	case MC_EV_BUS_RESET:
+	case MC_EV_SET_CONFIG_ZERO:
+		return false;
+	default:
+		return true;
+	}
+}
+
 static void mc_check_traps(int max_depth, struct mc_result *r)
 {
 	static uint8_t good[MC_MAX_STATES];
@@ -1320,6 +1393,23 @@ static void mc_check_traps(int max_depth, struct mc_result *r)
 
 				if (!mc_enabled(&mc_states[i],
 						(enum mc_event)ev)) {
+					continue;
+				}
+
+				/*
+				 * Recovery must be reachable by the device's
+				 * own actions. A bus reset or a reconfiguration
+				 * clears the busy flags through
+				 * disable()/enable(), so counting them as an
+				 * escape route makes every state trivially
+				 * "recoverable" -- but on hardware those only
+				 * happen when the user unplugs the device or
+				 * the host re-enumerates it, which is precisely
+				 * the outcome a wedge forces. Excluding them is
+				 * what makes this invariant mean "the firmware
+				 * can recover by itself".
+				 */
+				if (!mc_self_recovery_event((enum mc_event)ev)) {
 					continue;
 				}
 				mc_apply(&next, (enum mc_event)ev);
@@ -1537,6 +1627,65 @@ ZTEST(usb_model_check, test_finding_success_path_ignores_claim)
  * I5, the one that directly encodes "USB must not get stuck". Every reachable
  * state must have some path back to a fully-working configuration.
  */
+/*
+ * A lost completion is unrecoverable by design.
+ *
+ * This is the property that matters most, and it holds against the code as it
+ * actually is -- no injected bug required. If the controller consumes an armed
+ * transfer without raising BUFF_STATUS, no completion is delivered, so nothing
+ * clears the busy flag; and because every re-arm path is gated on that same
+ * flag, the endpoint can never be armed again. The only escape is a bus reset
+ * or reconfiguration, i.e. the user unplugging the device.
+ *
+ * Every wedge variant seen on hardware has this shape. See
+ * docs/usb-wedge-taxonomy.md -- the counters differ per variant but the
+ * terminal state is always "claim held, nothing outstanding, no path back".
+ *
+ * The checker reaches it in four events:
+ *   set_address -> set_configuration(1) -> rx_fifo_handler -> rx_completion_LOST
+ * leaving RX_BUSY set with rx_out=0 and rx_claim still held.
+ *
+ * This test is expected to FAIL until a level-triggered recovery path exists.
+ * It is the specification for that fix, not a regression guard: when recovery
+ * lands, this test should pass without being modified.
+ */
+ZTEST(usb_model_check, test_lost_completion_is_a_permanent_trap)
+{
+	struct mc_result r;
+
+	mc_clear_bugs();
+	mc_fix_success_path_checks_claim = true;
+	/*
+	 * Strict closure: once configured, recovery must not require the host
+	 * to reconfigure or reset the device. SET_ADDRESS/SET_CONFIGURATION are
+	 * excluded here (unlike the general trap test, which needs them to
+	 * reach a working state at all) because this test starts the closure
+	 * from already-configured states -- so using them as an escape route
+	 * would be modelling a re-enumeration, which is the user unplugging the
+	 * device.
+	 */
+	mc_strict_self_recovery = true;
+	mc_explore(MC_DEPTH, &r);
+	mc_check_traps(MC_DEPTH, &r);
+	mc_strict_self_recovery = false;
+	mc_clear_bugs();
+
+	printf("    explored %d states; %d trap states\n", r.states,
+	       r.trap_states);
+
+	if (r.trap_states) {
+		printf("    a lost completion strands the endpoint with no "
+		       "self-recovery path\n");
+		mc_print_trace(r.trap_node, "trap");
+		mc_print_state(&mc_states[r.trap_node]);
+	}
+
+	zassert_equal(r.trap_states, 0,
+		      "a completion lost by the controller must not permanently "
+		      "wedge the port: some device-side path must release the "
+		      "claim and re-arm, without requiring a bus reset");
+}
+
 ZTEST(usb_model_check, test_no_reachable_state_is_a_permanent_trap)
 {
 	struct mc_result r;
@@ -1549,8 +1698,17 @@ ZTEST(usb_model_check, test_no_reachable_state_is_a_permanent_trap)
 	 * answer. The finding itself is pinned by its own test above.
 	 */
 	mc_fix_success_path_checks_claim = true;
+	/*
+	 * Scoped to the no-loss subset. Lost completions are modelled and are a
+	 * genuine trap, but they are pinned by
+	 * test_lost_completion_is_a_permanent_trap above; leaving them enabled
+	 * here would make this test report the same finding and obscure any
+	 * *structural* trap that exists even when the controller behaves.
+	 */
+	mc_suppress_lost_completions = true;
 	mc_explore(MC_DEPTH, &r);
 	mc_check_traps(MC_DEPTH, &r);
+	mc_suppress_lost_completions = false;
 	mc_clear_bugs();
 
 	printf("    explored %d states; %d trap states\n", r.states,
