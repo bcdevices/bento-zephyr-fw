@@ -328,9 +328,12 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.crc_ep_tx_err,
 			       udc_rpi_pico_susp_trace.crc_sie_ctrl,
 			       udc_rpi_pico_susp_trace.crc_buf_status);
-			printk("  wakeup tries=%u ok=%u\n",
+			printk("  wakeup tries=%u ok=%u hist=%u/%u/%u\n",
 			       udc_rpi_pico_susp_trace.wakeup_tries,
-			       udc_rpi_pico_susp_trace.wakeup_ok);
+			       udc_rpi_pico_susp_trace.wakeup_ok,
+			       udc_rpi_pico_susp_trace.wakeup_attempt_hist[0],
+			       udc_rpi_pico_susp_trace.wakeup_attempt_hist[1],
+			       udc_rpi_pico_susp_trace.wakeup_attempt_hist[2]);
 			printk("  rxto=%u lastrxto=%u reattach=%u\n",
 			       udc_rpi_pico_susp_trace.rx_timeouts,
 			       udc_rpi_pico_susp_trace.last_rx_timeout_ms,
