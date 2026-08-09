@@ -168,6 +168,7 @@ static void wedge_report_thread(const struct k_thread *thread, void *user_data)
 extern bool udc_rpi_pico_link_is_dead(const struct device *dev);
 extern void udc_rpi_pico_force_reattach(const struct device *dev);
 extern bool udc_rpi_pico_try_wakeup(const struct device *dev);
+extern bool udc_rpi_pico_try_rearm_in(const struct device *dev);
 
 static void wedge_monitor(void *p1, void *p2, void *p3)
 {
@@ -212,6 +213,9 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 
 				if (udc_rpi_pico_try_wakeup(udc)) {
 					printk("!! link dead, remote wakeup "
+					       "restored frames\n");
+				} else if (udc_rpi_pico_try_rearm_in(udc)) {
+					printk("!! link dead, IN re-arm "
 					       "restored frames\n");
 				} else {
 					printk("!! link dead, wakeup failed, "
@@ -328,12 +332,14 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.crc_ep_tx_err,
 			       udc_rpi_pico_susp_trace.crc_sie_ctrl,
 			       udc_rpi_pico_susp_trace.crc_buf_status);
-			printk("  wakeup tries=%u ok=%u hist=%u/%u/%u\n",
+			printk("  wakeup tries=%u ok=%u hist=%u/%u/%u rearm=%u/%u\n",
 			       udc_rpi_pico_susp_trace.wakeup_tries,
 			       udc_rpi_pico_susp_trace.wakeup_ok,
 			       udc_rpi_pico_susp_trace.wakeup_attempt_hist[0],
 			       udc_rpi_pico_susp_trace.wakeup_attempt_hist[1],
-			       udc_rpi_pico_susp_trace.wakeup_attempt_hist[2]);
+			       udc_rpi_pico_susp_trace.wakeup_attempt_hist[2],
+			       udc_rpi_pico_susp_trace.rearm_tries,
+			       udc_rpi_pico_susp_trace.rearm_ok);
 			printk("  rxto=%u lastrxto=%u reattach=%u\n",
 			       udc_rpi_pico_susp_trace.rx_timeouts,
 			       udc_rpi_pico_susp_trace.last_rx_timeout_ms,

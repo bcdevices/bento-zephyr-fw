@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..56efe7b2f51 100644
+index b0fb2fcf44f..1a34d6831b1 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,38 @@
@@ -300,7 +300,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  	}
  }
  
-@@ -621,25 +802,247 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
+@@ -621,25 +802,296 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
  
  	buf = udc_buf_peek(ep_cfg);
  	if (buf == NULL) {
@@ -478,6 +478,55 @@ index b0fb2fcf44f..56efe7b2f51 100644
 +	return false;
 +}
 +
++/*
++ * Rung 1.5: cancel and re-arm the bulk IN endpoint.
++ *
++ * Rationale for testing it, and the prediction: this should do NOTHING. At the
++ * wedge the endpoint is already armed with AVAIL set, the correct data-toggle
++ * and the correct payload -- the SIE is retransmitting it on every IN token
++ * the host sends, in hardware, without software involvement. Cancelling and
++ * re-arming reconstructs an identical buf_ctrl. USB is host-polled, so with
++ * SOFs frozen there are no tokens to respond to and nothing for a "retry" to
++ * act on.
++ *
++ * It is measured anyway because it is cheap and the prediction is falsifiable:
++ * if the SIE has some internal state that a re-arm clears (a stuck transmit
++ * FSM, say), this would expose it. Counted separately so the answer is data
++ * rather than argument.
++ */
++bool udc_rpi_pico_try_rearm_in(const struct device *dev)
++{
++	struct udc_ep_config *cfg = udc_get_ep_cfg(dev, 0x82);
++	struct net_buf *buf;
++
++	udc_rpi_pico_susp_trace.rearm_tries++;
++
++	if (cfg == NULL) {
++		return false;
++	}
++
++	buf = udc_buf_peek(cfg);
++	if (buf == NULL) {
++		return false;
++	}
++
++	/* Cancel rolls next_pid back, so the re-prep re-arms the same PID. */
++	rpi_pico_ep_cancel(dev, 0x82);
++	if (rpi_pico_prep_tx(dev, buf, cfg) == 0) {
++		udc_ep_set_busy(cfg, true);
++	}
++
++	k_msleep(RPI_PICO_WAKEUP_WAIT_MS);
++
++	if (udc_rpi_pico_susp_trace.last_sof_ms >
++	    udc_rpi_pico_susp_trace.wakeup_mark_ms) {
++		udc_rpi_pico_susp_trace.rearm_ok++;
++		return true;
++	}
++
++	return false;
++}
++
 +void udc_rpi_pico_force_reattach(const struct device *dev)
 +{
 +	udc_rpi_pico_susp_trace.reattaches++;
@@ -550,7 +599,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  static void rpi_pico_handle_buff_status(const struct device *dev)
  {
  	const struct rpi_pico_config *config = dev->config;
-@@ -648,13 +1051,40 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
+@@ -648,13 +1100,40 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
  	uint8_t ep;
  
  	buf_status = sys_read32((mm_reg_t)&base->buf_status);
@@ -592,7 +641,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  		/* Odd bits in the register correspond to OUT endpoints */
  		if (i & 1U) {
  			ep = USB_EP_DIR_OUT | (i >> 1U);
-@@ -677,6 +1107,28 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -677,6 +1156,28 @@ static void rpi_pico_isr_handler(const struct device *dev)
  	uint32_t status = base->ints;
  	uint32_t handled = 0;
  
@@ -621,7 +670,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  	if (status & USB_INTS_DEV_SOF_BITS) {
  		handled |= USB_INTS_DEV_SOF_BITS;
  		udc_submit_sof_event(dev);
-@@ -716,16 +1168,101 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -716,16 +1217,101 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
  	}
  
@@ -732,7 +781,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  	}
  
  	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
-@@ -733,19 +1270,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -733,19 +1319,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
  
  		priv->rwu_pending = false;
@@ -766,7 +815,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  		handled |= USB_INTS_BUS_RESET_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
  
-@@ -755,6 +1299,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -755,6 +1348,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  
  	if (status & USB_INTS_ERROR_DATA_SEQ_BITS) {
  		handled |= USB_INTS_ERROR_DATA_SEQ_BITS;
@@ -774,7 +823,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  		sie_status_clr(dev, USB_SIE_STATUS_DATA_SEQ_ERROR_BITS);
  		/*
  		 * This can be triggered before the STALL handshake response
-@@ -769,12 +1314,41 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -769,12 +1363,41 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_ERROR_RX_TIMEOUT_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_RX_TIMEOUT_BITS);
  
@@ -816,7 +865,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  		handled |= USB_INTS_ERROR_RX_OVERFLOW_BITS;
  
  		LOG_ERR("RX overflow");
-@@ -784,6 +1358,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -784,6 +1407,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  	if (status & USB_INTS_ERROR_BIT_STUFF_BITS) {
  		handled |= USB_INTS_ERROR_BIT_STUFF_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_BIT_STUFF_ERROR_BITS);
@@ -824,7 +873,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  
  		LOG_ERR("Bit Stuff Error");
  		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
-@@ -792,6 +1367,27 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -792,6 +1416,27 @@ static void rpi_pico_isr_handler(const struct device *dev)
  	if (status & USB_INTS_ERROR_CRC_BITS) {
  		handled |= USB_INTS_ERROR_CRC_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_CRC_ERROR_BITS);
@@ -852,7 +901,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  
  		LOG_ERR("CRC Error");
  		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
-@@ -812,6 +1408,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -812,6 +1457,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_SETUP_REQ_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
  
@@ -860,7 +909,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  		rpi_pico_handle_setup(dev);
  	}
  
-@@ -975,6 +1572,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
+@@ -975,6 +1621,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
  		/* Cancel responds with a STALL handshake.*/
  		rpi_pico_ep_cancel(dev, cfg->addr);
  	} else {
@@ -891,7 +940,7 @@ index b0fb2fcf44f..56efe7b2f51 100644
  		rpi_pico_bit_clr(buf_ctrl_reg, USB_BUF_CTRL_STALL);
  	}
  
-@@ -1064,6 +1685,29 @@ static int udc_rpi_pico_enable(const struct device *dev)
+@@ -1064,6 +1734,29 @@ static int udc_rpi_pico_enable(const struct device *dev)
  	sys_write32(USB_SIE_CTRL_EP0_INT_1BUF_BITS, (mm_reg_t)&base->sie_ctrl);
  
  	/* Enable interrupts */
