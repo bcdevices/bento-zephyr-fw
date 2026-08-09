@@ -167,6 +167,7 @@ static void wedge_report_thread(const struct k_thread *thread, void *user_data)
 
 extern bool udc_rpi_pico_link_is_dead(const struct device *dev);
 extern void udc_rpi_pico_force_reattach(const struct device *dev);
+extern bool udc_rpi_pico_try_wakeup(const struct device *dev);
 
 static void wedge_monitor(void *p1, void *p2, void *p3)
 {
@@ -199,9 +200,24 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 				DEVICE_DT_GET(DT_NODELABEL(usbd));
 
 			if (udc_rpi_pico_link_is_dead(udc)) {
-				printk("!! link dead (rx_timeout + no SOF), "
-				       "forcing re-attach\n");
-				udc_rpi_pico_force_reattach(udc);
+				/*
+				 * Escalating ladder. Remote wakeup first: it
+				 * preserves enumeration, so the /dev node and
+				 * the session survive. Only if frames do not
+				 * return do we present a disconnect, which
+				 * always works but churns the port.
+				 */
+				udc_rpi_pico_susp_trace.wakeup_mark_ms =
+					udc_rpi_pico_susp_trace.last_sof_ms;
+
+				if (udc_rpi_pico_try_wakeup(udc)) {
+					printk("!! link dead, remote wakeup "
+					       "restored frames\n");
+				} else {
+					printk("!! link dead, wakeup failed, "
+					       "forcing re-attach\n");
+					udc_rpi_pico_force_reattach(udc);
+				}
 			}
 		}
 
@@ -312,6 +328,9 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.crc_ep_tx_err,
 			       udc_rpi_pico_susp_trace.crc_sie_ctrl,
 			       udc_rpi_pico_susp_trace.crc_buf_status);
+			printk("  wakeup tries=%u ok=%u\n",
+			       udc_rpi_pico_susp_trace.wakeup_tries,
+			       udc_rpi_pico_susp_trace.wakeup_ok);
 			printk("  rxto=%u lastrxto=%u reattach=%u\n",
 			       udc_rpi_pico_susp_trace.rx_timeouts,
 			       udc_rpi_pico_susp_trace.last_rx_timeout_ms,

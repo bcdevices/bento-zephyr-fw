@@ -1,0 +1,38 @@
+diff --git i/subsys/usb/device_next/app/Kconfig.cdc_acm_serial w/subsys/usb/device_next/app/Kconfig.cdc_acm_serial
+index 5192d5636d9..6becb3fbb76 100644
+--- i/subsys/usb/device_next/app/Kconfig.cdc_acm_serial
++++ w/subsys/usb/device_next/app/Kconfig.cdc_acm_serial
+@@ -54,6 +54,17 @@ config CDC_ACM_SERIAL_SELF_POWERED
+ 	help
+ 	  Set the Self-powered attribute in the configuration.
+ 
++config CDC_ACM_SERIAL_REMOTE_WAKEUP
++	bool "USB device Remote Wakeup attribute"
++	help
++	  Set the Remote Wakeup attribute in the configuration descriptor.
++
++	  Without this the host never issues SET_FEATURE(DEVICE_REMOTE_WAKEUP),
++	  so usbd_wakeup_request() is rejected with -EACCES and the device has
++	  no way to ask a suspended host to resume it. Enable this if the
++	  application needs to recover a link the host has stopped servicing
++	  without forcing a full re-enumeration.
++
+ config CDC_ACM_SERIAL_MAX_POWER
+ 	int "USB device bMaxPower value"
+ 	default 125
+diff --git i/subsys/usb/device_next/app/cdc_acm_serial.c w/subsys/usb/device_next/app/cdc_acm_serial.c
+index af081469303..f53fd39444d 100644
+--- i/subsys/usb/device_next/app/cdc_acm_serial.c
++++ w/subsys/usb/device_next/app/cdc_acm_serial.c
+@@ -32,8 +32,9 @@ IF_ENABLED(CONFIG_HWINFO, (USBD_DESC_SERIAL_NUMBER_DEFINE(cdc_acm_serial_sn)));
+ USBD_DESC_CONFIG_DEFINE(fs_cfg_desc, "FS Configuration");
+ USBD_DESC_CONFIG_DEFINE(hs_cfg_desc, "HS Configuration");
+ 
+-static const uint8_t attributes = IS_ENABLED(CONFIG_CDC_ACM_SERIAL_SELF_POWERED) ?
+-				  USB_SCD_SELF_POWERED : 0;
++static const uint8_t attributes =
++	(IS_ENABLED(CONFIG_CDC_ACM_SERIAL_SELF_POWERED) ? USB_SCD_SELF_POWERED : 0) |
++	(IS_ENABLED(CONFIG_CDC_ACM_SERIAL_REMOTE_WAKEUP) ? USB_SCD_REMOTE_WAKEUP : 0);
+ 
+ USBD_CONFIGURATION_DEFINE(cdc_acm_serial_fs_config,
+ 			  attributes,
