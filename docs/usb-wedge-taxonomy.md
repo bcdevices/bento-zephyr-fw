@@ -406,6 +406,35 @@ Practical consequence for testing: measure wedges per packet, not per command
 or per transaction of the harness. Two runs that differ in reply size are not
 comparable.
 
+### J-Link detached from the board
+
+Measured with the debug probe unplugged from the target (host cable unchanged):
+
+| Configuration | CRC/sec |
+|---|---|
+| Board 1, J-Link attached | 9.1 - 10.8 |
+| Board 2, J-Link attached | 3.0 |
+| **Board 2, J-Link detached** | **3.2 - 3.8** |
+
+On board 2 the probe makes no measurable difference: 3.0 attached versus
+3.2-3.8 detached, which is within the spread of repeated measurements on an
+unchanged configuration. The J-Link is therefore **not** a contributor to the
+error rate.
+
+That also means the earlier board-1-vs-board-2 comparison stands as a genuine
+unit-to-unit difference rather than an artifact of probe loading, since both
+were measured with the probe attached.
+
+**Endurance was too noisy to draw a conclusion from.** Three runs of
+`app.version` in a loop gave 59, 1 and 61 packets before wedging. The 1-packet
+run almost certainly reconnected mid-recovery rather than measuring a real
+failure. The CRC rate is the stable measurement; packet endurance needs many
+more trials, and any single endurance number should be disregarded.
+
+Also observed in this window: `reattach 5 -> 5` with `wakeup tries=6 ok=1`,
+i.e. one link death recovered by remote wakeup alone with enumeration intact
+and no forced re-attach.
+
 ### What has NOT been established
 
 - Whether the CRC errors originate in the cable, connector, board, host port, or
