@@ -1,5 +1,5 @@
 diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
-index b0fb2fcf44f..25dddcf43e1 100644
+index b0fb2fcf44f..d139f6edfe1 100644
 --- i/drivers/usb/udc/udc_rpi_pico.c
 +++ w/drivers/usb/udc/udc_rpi_pico.c
 @@ -23,6 +23,24 @@
@@ -143,7 +143,20 @@ index b0fb2fcf44f..25dddcf43e1 100644
  	udc_ep_set_busy(ep_cfg, false);
  	LOG_INF("Canceled ep 0x%02x transaction", ep);
  }
-@@ -437,6 +538,7 @@ static int rpi_pico_handle_evt_din(const struct device *dev,
+@@ -256,6 +357,12 @@ static int rpi_pico_prep_rx(const struct device *dev,
+ 
+ 	buf_ctrl = cfg->mps;
+ 	buf_ctrl |= ep_data->next_pid ? USB_BUF_CTRL_DATA1_PID : USB_BUF_CTRL_DATA0_PID;
++	if (cfg->addr == 0x01) {
++		udc_rpi_pico_susp_trace.out_arm_pid =
++			(udc_rpi_pico_susp_trace.out_arm_pid << 1) |
++			ep_data->next_pid;
++		udc_rpi_pico_susp_trace.out_arms++;
++	}
+ 	ep_data->next_pid ^= 1U;
+ 
+ 	write_buf_ctrl_reg(dev, cfg->addr, buf_ctrl);
+@@ -437,6 +544,7 @@ static int rpi_pico_handle_evt_din(const struct device *dev,
  	}
  
  	buf = udc_buf_get(cfg);
@@ -151,7 +164,7 @@ index b0fb2fcf44f..25dddcf43e1 100644
  	udc_ep_set_busy(cfg, false);
  
  	if (cfg->addr == USB_CONTROL_EP_IN) {
-@@ -487,8 +589,12 @@ static void rpi_pico_handle_xfer_next(const struct device *dev,
+@@ -487,8 +595,12 @@ static void rpi_pico_handle_xfer_next(const struct device *dev,
  	}
  
  	if (err != 0) {
@@ -164,7 +177,7 @@ index b0fb2fcf44f..25dddcf43e1 100644
  		udc_ep_set_busy(cfg, true);
  	}
  }
-@@ -524,8 +630,13 @@ static ALWAYS_INLINE void rpi_pico_thread_handler(void *const arg)
+@@ -524,8 +636,13 @@ static ALWAYS_INLINE void rpi_pico_thread_handler(void *const arg)
  			if (!udc_ep_is_busy(ep_cfg)) {
  				rpi_pico_handle_xfer_next(dev, ep_cfg);
  			} else {
@@ -178,7 +191,7 @@ index b0fb2fcf44f..25dddcf43e1 100644
  		}
  	}
  
-@@ -542,6 +653,8 @@ static ALWAYS_INLINE void rpi_pico_thread_handler(void *const arg)
+@@ -542,6 +659,8 @@ static ALWAYS_INLINE void rpi_pico_thread_handler(void *const arg)
  			if (!udc_ep_is_busy(ep_cfg)) {
  				rpi_pico_handle_xfer_next(dev, ep_cfg);
  			} else {
@@ -187,7 +200,7 @@ index b0fb2fcf44f..25dddcf43e1 100644
  				LOG_ERR("Endpoint 0x%02x busy", ep);
  			}
  		}
-@@ -586,9 +699,23 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+@@ -586,9 +705,23 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
  	struct net_buf *buf;
  	size_t len;
  
@@ -211,7 +224,7 @@ index b0fb2fcf44f..25dddcf43e1 100644
  		udc_submit_event(dev, UDC_EVT_ERROR, -ENOBUFS);
  		return;
  	}
-@@ -596,18 +723,52 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+@@ -596,18 +729,52 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
  	len = read_buf_ctrl_reg(dev, ep) & USB_BUF_CTRL_LEN_MASK;
  	net_buf_pull(buf, len);
  
@@ -273,7 +286,22 @@ index b0fb2fcf44f..25dddcf43e1 100644
  	}
  }
  
-@@ -630,10 +791,23 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
+@@ -621,19 +788,38 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
+ 
+ 	buf = udc_buf_peek(ep_cfg);
+ 	if (buf == NULL) {
++		udc_rpi_pico_susp_trace.out_bs_nobuf++;
+ 		LOG_ERR("No buffer for ep 0x%02x", ep);
+ 		udc_submit_event(dev, UDC_EVT_ERROR, -ENOBUFS);
+ 		return;
+ 	}
+ 
++	if (ep == 0x01) {
++		udc_rpi_pico_susp_trace.out_bs++;
++		udc_rpi_pico_susp_trace.out_last_bufctrl =
++			read_buf_ctrl_reg(dev, ep);
++	}
+ 	len = read_buf_ctrl_reg(dev, ep) & USB_BUF_CTRL_LEN_MASK;
  	net_buf_add_mem(buf, ep_data->buf, MIN(len, net_buf_tailroom(buf)));
  
  	if (net_buf_tailroom(buf) && len == udc_mps_ep_size(ep_cfg)) {
@@ -299,10 +327,16 @@ index b0fb2fcf44f..25dddcf43e1 100644
  	} else {
  		atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
  		k_event_post(&priv->events, BIT(RPI_PICO_EVT_XFER_FINISHED));
-@@ -649,12 +823,34 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
+@@ -648,13 +834,40 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
+ 	uint8_t ep;
  
  	buf_status = sys_read32((mm_reg_t)&base->buf_status);
- 
++	udc_rpi_pico_susp_trace.bs_calls++;
++	udc_rpi_pico_susp_trace.bs_last_word = buf_status;
++	if (buf_status == 0) {
++		udc_rpi_pico_susp_trace.bs_empty++;
++	}
++
 +	/*
 +	 * BUFF_STATUS bits are write-1-to-clear, and INTS.BUFF_STATUS is a
 +	 * read-only level derived from them ("Raised when any bit in
@@ -325,7 +359,7 @@ index b0fb2fcf44f..25dddcf43e1 100644
 +	 * complete such that a cleared bit re-sets on the next cycle).
 +	 */
 +	sys_write32(buf_status, (mm_reg_t)&base->buf_status);
-+
+ 
  	for (unsigned int i = 0; buf_status && i < USB_NUM_ENDPOINTS * 2; i++) {
  		if (!(buf_status & BIT(i))) {
  			continue;
@@ -335,7 +369,19 @@ index b0fb2fcf44f..25dddcf43e1 100644
  		/* Odd bits in the register correspond to OUT endpoints */
  		if (i & 1U) {
  			ep = USB_EP_DIR_OUT | (i >> 1U);
-@@ -716,16 +912,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -677,6 +890,11 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 	uint32_t status = base->ints;
+ 	uint32_t handled = 0;
+ 
++	udc_rpi_pico_susp_trace.isr_count++;
++	if (status & USB_INTS_BUFF_STATUS_BITS) {
++		udc_rpi_pico_susp_trace.isr_bs_seen++;
++	}
++
+ 	if (status & USB_INTS_DEV_SOF_BITS) {
+ 		handled |= USB_INTS_DEV_SOF_BITS;
+ 		udc_submit_sof_event(dev);
+@@ -716,16 +934,99 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
  	}
  
@@ -444,7 +490,7 @@ index b0fb2fcf44f..25dddcf43e1 100644
  	}
  
  	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
-@@ -733,19 +1012,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -733,19 +1034,26 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		sie_status_clr(dev, USB_SIE_STATUS_RESUME_BITS);
  
  		priv->rwu_pending = false;
@@ -478,7 +524,15 @@ index b0fb2fcf44f..25dddcf43e1 100644
  		handled |= USB_INTS_BUS_RESET_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
  
-@@ -812,6 +1098,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+@@ -755,6 +1063,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 
+ 	if (status & USB_INTS_ERROR_DATA_SEQ_BITS) {
+ 		handled |= USB_INTS_ERROR_DATA_SEQ_BITS;
++		udc_rpi_pico_susp_trace.seq_errors++;
+ 		sie_status_clr(dev, USB_SIE_STATUS_DATA_SEQ_ERROR_BITS);
+ 		/*
+ 		 * This can be triggered before the STALL handshake response
+@@ -812,6 +1121,7 @@ static void rpi_pico_isr_handler(const struct device *dev)
  		handled |= USB_INTS_SETUP_REQ_BITS;
  		sie_status_clr(dev, USB_SIE_STATUS_SETUP_REC_BITS);
  
@@ -486,7 +540,7 @@ index b0fb2fcf44f..25dddcf43e1 100644
  		rpi_pico_handle_setup(dev);
  	}
  
-@@ -975,6 +1262,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
+@@ -975,6 +1285,30 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
  		/* Cancel responds with a STALL handshake.*/
  		rpi_pico_ep_cancel(dev, cfg->addr);
  	} else {

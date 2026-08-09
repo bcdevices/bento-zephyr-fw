@@ -218,6 +218,21 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.out_cont_fail,
 			       udc_rpi_pico_susp_trace.in_nobuf,
 			       udc_rpi_pico_susp_trace.in_cont);
+			printk("  OUT arms=%u bs=%u nobuf=%u pids=%08x "
+			       "bufctrl=%08x seqerr=%u\n",
+			       udc_rpi_pico_susp_trace.out_arms,
+			       udc_rpi_pico_susp_trace.out_bs,
+			       udc_rpi_pico_susp_trace.out_bs_nobuf,
+			       udc_rpi_pico_susp_trace.out_arm_pid,
+			       udc_rpi_pico_susp_trace.out_last_bufctrl,
+			       udc_rpi_pico_susp_trace.seq_errors);
+			printk("  isr=%u bsirq=%u bscalls=%u bsempty=%u "
+			       "bsword=%08x\n",
+			       udc_rpi_pico_susp_trace.isr_count,
+			       udc_rpi_pico_susp_trace.isr_bs_seen,
+			       udc_rpi_pico_susp_trace.bs_calls,
+			       udc_rpi_pico_susp_trace.bs_empty,
+			       udc_rpi_pico_susp_trace.bs_last_word);
 			printk("  udc newbusy=%u ep=%02x finbusy=%u qafterfin=%u\n",
 			       udc_rpi_pico_susp_trace.new_but_busy,
 			       udc_rpi_pico_susp_trace.last_busy_ep,
