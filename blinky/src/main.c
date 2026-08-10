@@ -46,6 +46,30 @@
 #define USB_REG_EP_RX_ERROR   (USB_BASE_ADDR + 0x110U)
 
 /*
+ * XIP cache counters, RP2350 datasheet section 4.4.1 (tables 442 and 443).
+ *
+ * Present to answer one specific question: the CRC errors are independent of
+ * USB traffic, so the aggressor -- if this is a power-integrity problem at all
+ * -- is something that runs regardless of USB. QSPI was the leading suspect,
+ * because QSPI_IOVDD (pin 69) and USB_OTP_VDD (pin 68) share both the MCU_3V3
+ * rail and their nearest decoupling capacitor (C16, 3.68 mm from each).
+ *
+ * That argument assumed XIP fetches are continuous. The assumption is not
+ * obviously true: CONFIG_XIP=y, but the image is ~32 kB against a 16 kB cache,
+ * so an idle shell's working set may sit entirely resident, leaving the QSPI
+ * pins quiet. These counters measure it instead of assuming it.
+ *
+ * misses = CTR_ACC - CTR_HIT. A miss is what actually drives the QSPI pins;
+ * a hit is serviced on-chip and costs nothing on the rail.
+ *
+ * Both are 32-bit saturating and clear on a write of any value, so we clear
+ * each interval and report a rate rather than a total.
+ */
+#define XIP_CTRL_BASE     0x400c8000U
+#define XIP_REG_CTR_HIT   (XIP_CTRL_BASE + 0x0cU)
+#define XIP_REG_CTR_ACC   (XIP_CTRL_BASE + 0x10U)
+
+/*
  * Buffer control for the CDC bulk IN endpoint (EP2 IN), in USB DPRAM -- a
  * different aperture from the register block above. Layout: 8-byte setup
  * packet, then 15 ep_ctrl pairs (0x78), then ep_buf_ctrl pairs from 0x80, two
@@ -173,10 +197,17 @@ extern bool udc_rpi_pico_try_rearm_in(const struct device *dev);
 static void wedge_monitor(void *p1, void *p2, void *p3)
 {
 	int dump_div = 0;
+	int64_t xip_mark_ms;
+	uint32_t xip_last_crc = 0;
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
+
+	/* Start both windows from a known zero. */
+	sys_write32(1U, XIP_REG_CTR_ACC);
+	sys_write32(1U, XIP_REG_CTR_HIT);
+	xip_mark_ms = k_uptime_get();
 
 	while (1) {
 		k_msleep(500);
@@ -332,6 +363,41 @@ static void wedge_monitor(void *p1, void *p2, void *p3)
 			       udc_rpi_pico_susp_trace.crc_ep_tx_err,
 			       udc_rpi_pico_susp_trace.crc_sie_ctrl,
 			       udc_rpi_pico_susp_trace.crc_buf_status);
+			{
+				/*
+				 * QSPI activity over the interval just elapsed,
+				 * paired with the CRC count over the same
+				 * window so the two rates are comparable.
+				 *
+				 * Reading these registers is itself an XIP
+				 * access whenever this code is not already
+				 * cache-resident, so treat a small miss count
+				 * as a noise floor rather than as signal.
+				 */
+				uint32_t acc = sys_read32(XIP_REG_CTR_ACC);
+				uint32_t hit = sys_read32(XIP_REG_CTR_HIT);
+				uint32_t miss = acc - hit;
+				uint32_t crc =
+					udc_rpi_pico_susp_trace.crc_errors;
+				int64_t now = k_uptime_get();
+				uint32_t dt = (uint32_t)(now - xip_mark_ms);
+
+				printk("  xip acc=%u hit=%u miss=%u (%u/s) | "
+				       "crc %u (%u/s) over %u ms\n",
+				       acc, hit, miss,
+				       dt ? (uint32_t)((uint64_t)miss * 1000U
+							/ dt) : 0U,
+				       crc - xip_last_crc,
+				       dt ? ((crc - xip_last_crc) * 1000U / dt)
+					  : 0U,
+				       dt);
+
+				/* Write-any-value-to-clear; restart the window. */
+				sys_write32(1U, XIP_REG_CTR_ACC);
+				sys_write32(1U, XIP_REG_CTR_HIT);
+				xip_last_crc = crc;
+				xip_mark_ms = k_uptime_get();
+			}
 			printk("  wakeup tries=%u ok=%u hist=%u/%u/%u rearm=%u/%u\n",
 			       udc_rpi_pico_susp_trace.wakeup_tries,
 			       udc_rpi_pico_susp_trace.wakeup_ok,
