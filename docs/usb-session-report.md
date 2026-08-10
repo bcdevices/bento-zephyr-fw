@@ -176,27 +176,53 @@ masking.
 
 ### 5.1 Decoupling on `USB_OTP_VDD` — the leading hardware candidate
 
-Measured from pad coordinates in the KiCad PCB:
+Compared against Raspberry Pi's own `RP2350B Minimal` reference design
+(`RP-010329-CA-1`), parsed from both `.kicad_pcb` files. Both boards are
+RP2350B in the same QFN-80 package, so pin numbers are directly comparable.
 
-```
-13 MCU_3V3 supply pins served by 6 capacitors, at 2.2 – 7.9 mm
-  pin 68 (USB_OTP_VDD, the USB transceiver supply): nearest cap 3.68 mm
-```
+Pin functions below are from datasheet Table 1432 ("Power supply pins"), not
+inferred from the netlist.
 
-RP's hardware design guide calls for 100 nF per supply pin at roughly 1 mm.
+**`USB_OTP_VDD` is pin 68**, and it is the supply for the USB full-speed PHY
+(datasheet Table 1431: both `USB_DP` and `USB_DM` sit in the `USB_OTP_VDD`
+power domain).
+
+The deviation, stated as the datasheet states it (§6.1.4):
+
+> "USB_OTP_VDD should be decoupled with a 100nF capacitor close to the chip's
+> USB_OTP_VDD pin."
+
+| | RP reference | Bento 2 |
+|---|---|---|
+| Dedicated 100 nF on pin 68 | **C12, 100 nF @ 1.88 mm** | **none** |
+| Nearest cap on pin 68's net | C6, 4.7 µF @ 1.88 mm | C16, 0.1 µF @ 3.68 mm |
+| Pins that nearest cap also serves | 7 | 6 |
+
+RP places **two** caps near pin 68 — a bulk 4.7 µF (C6) *and* a dedicated
+100 nF (C12) at 1.88 mm. Bento has a single shared 0.1 µF (C16) at 3.68 mm
+that simultaneously serves pins 59, 60, 62, 64, 68 and 69. So the deviation is
+not merely "the cap is further away"; **the dedicated high-frequency cap the
+datasheet asks for by name does not exist on this design.**
+
+Cap count on the 3V3 rail overall: RP uses 13 caps on `+3V3`, Bento uses 6 on
+`MCU_3V3` for a comparable pin count.
 
 **This explains both unexplained observations.** Traffic-independence:
-`QSPI_IOVDD` shares the rail and XIP flash fetches run constantly whether or not
-USB moves a byte. Unit-to-unit 3× variation: ceramic tolerance, DC-bias
-derating and solder/via variation on a design with no margin to absorb it.
+`QSPI_IOVDD` (pin 69) shares both the rail *and* C16, and XIP flash fetches run
+constantly whether or not USB moves a byte. Unit-to-unit 3× variation: ceramic
+tolerance, DC-bias derating and solder/via variation on a design with no margin
+to absorb it.
 
 **Test (5 minutes):** tack a 100 nF 0402 from pin 68 to its nearest ground via,
-shortest possible leads, and re-measure the CRC rate.
+shortest possible leads, and re-measure the CRC rate. This reproduces RP's C12.
 
-*Caveat:* every schematic `Value` field is the unresolved string
-`${ALTIUM_VALUE}`, so **actual capacitance values are unverified**. The argument
-rests on count and placement, measured directly from pad coordinates. Confirm
-values against the BOM.
+*Correction to an earlier version of this document:* it claimed "RP's hardware
+design guide calls for 100 nF per supply pin at roughly 1 mm". **That number was
+inferred, not sourced** — the datasheet says only "close to", with no dimension
+anywhere in §6.1, and prescribes caps on *named* pins rather than on every
+supply pin. The reference layout above replaces that inference with a
+measurement. Likewise, the earlier `${ALTIUM_VALUE}` caveat does not apply to
+the PCB file: footprint `Value` fields there resolve normally (C16 = 0.1 µF).
 
 ### 5.2 Buck regulator coupling — second candidate
 

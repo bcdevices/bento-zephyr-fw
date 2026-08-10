@@ -327,6 +327,34 @@ build configuration:
 | **RP2350-E12** (clk_sys must exceed clk_usb by >=10%) | **Not applicable**: clk_sys 150 MHz vs clk_usb 48 MHz, a 3.1x margin |
 | clk_usb source | `pll_usb` <- `xosc`, not ROSC -- rules out oscillator-accuracy drift |
 
+### Compared against Raspberry Pi's RP2350B Minimal reference design
+
+Source: `RP-010329-CA-1-RP2350B Minimal KiCAD`, parsed from the `.kicad_pcb`.
+Same silicon, same QFN-80 package, so pin numbers compare directly. Pin
+functions taken from datasheet Table 1432, not inferred.
+
+| Candidate | RP reference | Bento 2 | Verdict |
+|---|---|---|---|
+| **100 nF on pin 68 (`USB_OTP_VDD`)** | **C12, 100 nF @ 1.88 mm** | **absent** | **deviation** |
+| Caps on the 3V3 rail | 13 | 6 | thinner |
+| Nearest cap to pin 68 | 4.7 uF @ 1.88 mm | 0.1 uF @ 3.68 mm, shared by 6 pins | weaker |
+| D+/D- routed length | ~20.2 mm | ~36.6 mm | longer, not a fault |
+| Vias on the pair | 0 (all `F.Cu`) | 1 per leg, symmetric | acceptable |
+| Stackup | 2-layer | 4-layer | Bento better |
+| D+/D- skew | 0.34 mm | 0.12 mm | Bento better |
+
+Read carefully: on the differential pair Bento is the *better* layout of the
+two -- 4 layers against RP's 2, and tighter skew. The routing is not the
+problem. **The single clear deviation is the missing dedicated 100 nF on
+`USB_OTP_VDD`**, which the datasheet asks for by name in §6.1.4 and which RP
+themselves fit as C12. Bento's pin 68 shares one 0.1 uF (C16) with pins 59, 60,
+62, 64 and 69 -- including `QSPI_IOVDD`, which is exactly the noisy neighbour
+that would explain traffic-independent errors.
+
+Note the ~36.6 mm D+/D- length is longer than RP's ~20.2 mm but well inside
+full-speed limits; at 12 Mbit/s this is electrically short and is *not* offered
+here as a contributing cause.
+
 ### Error attribution: not SOFs
 
 The errors are attributable to real endpoint transactions, not to frame
