@@ -333,27 +333,50 @@ Source: `RP-010329-CA-1-RP2350B Minimal KiCAD`, parsed from the `.kicad_pcb`.
 Same silicon, same QFN-80 package, so pin numbers compare directly. Pin
 functions taken from datasheet Table 1432, not inferred.
 
+Every cap on pin 68's supply net, ranked by distance to the pin:
+
+| RP reference (`+3V3`) | | Bento 2 (`MCU_3V3`) | |
+|---|---|---|---|
+| C6 | 4.7 uF @ **1.88 mm** | C16 | 0.1 uF @ **3.68 mm** |
+| C12 | 100 nF @ 4.81 mm | C15 | 0.1 uF @ 8.12 mm |
+| C20 | 100 nF @ 6.05 mm | C14 | 0.1 uF @ 10.59 mm |
+| C14 | 100 nF @ 7.09 mm | C13 | 0.1 uF @ 12.93 mm |
+| | | C5 | 4.7 uF @ 13.76 mm |
+
 | Candidate | RP reference | Bento 2 | Verdict |
 |---|---|---|---|
-| **100 nF on pin 68 (`USB_OTP_VDD`)** | **C12, 100 nF @ 1.88 mm** | **absent** | **deviation** |
-| Caps on the 3V3 rail | 13 | 6 | thinner |
-| Nearest cap to pin 68 | 4.7 uF @ 1.88 mm | 0.1 uF @ 3.68 mm, shared by 6 pins | weaker |
+| Nearest cap to pin 68 | 1.88 mm | 3.68 mm | ~2x further |
+| Caps within 6 mm of pin 68 | 3 | 1 | thinner locally |
+| Caps on the 3V3 rail | 13 | 6 | thinner overall |
+| Nearest bulk (4.7 uF) to pin 68 | 1.88 mm | 13.76 mm | far |
 | D+/D- routed length | ~20.2 mm | ~36.6 mm | longer, not a fault |
 | Vias on the pair | 0 (all `F.Cu`) | 1 per leg, symmetric | acceptable |
 | Stackup | 2-layer | 4-layer | Bento better |
-| D+/D- skew | 0.34 mm | 0.12 mm | Bento better |
+| D+/D- skew | 0.34 mm | 0.13 mm | Bento better |
 
-Read carefully: on the differential pair Bento is the *better* layout of the
-two -- 4 layers against RP's 2, and tighter skew. The routing is not the
-problem. **The single clear deviation is the missing dedicated 100 nF on
-`USB_OTP_VDD`**, which the datasheet asks for by name in §6.1.4 and which RP
-themselves fit as C12. Bento's pin 68 shares one 0.1 uF (C16) with pins 59, 60,
-62, 64 and 69 -- including `QSPI_IOVDD`, which is exactly the noisy neighbour
-that would explain traffic-independent errors.
+**Bento does have a 100 nF on pin 68's net** -- C16, at 3.68 mm. This is a
+difference of degree, not a missing part. The differences that survive
+measurement are:
 
-Note the ~36.6 mm D+/D- length is longer than RP's ~20.2 mm but well inside
-full-speed limits; at 12 Mbit/s this is electrically short and is *not* offered
-here as a contributing cause.
+1. **Nearest cap is ~2x further** (3.68 mm vs 1.88 mm): more loop inductance
+   between the pin and its closest charge reservoir.
+2. **Local bulk is absent.** RP put a 4.7 uF within 1.88 mm of pin 68;
+   Bento's nearest 4.7 uF is 13.76 mm away. Bento's pin 68 has exactly one
+   cap of any kind within 6 mm, where RP has three.
+3. **C16 is shared** with pins 59, 60, 62, 64 and 69 -- including
+   `QSPI_IOVDD`, whose XIP fetches run continuously regardless of USB
+   traffic. That sharing is the plausible mechanism for errors that do not
+   scale with USB load.
+
+On the differential pair Bento is the *better* layout of the two -- 4 layers
+against RP's 2, and tighter skew. Routing is positively excluded, not merely
+unproven. The ~36.6 mm length is longer than RP's ~20.2 mm but electrically
+short at 12 Mbit/s and is *not* offered as a contributing cause.
+
+Confidence: a real but **modest** deviation. It is consistent with the symptoms
+and with the unit-to-unit variation, but 3.68 mm is not so far as to make
+errors inevitable, and nothing here demonstrates causation. The bench test is
+what would settle it.
 
 ### Error attribution: not SOFs
 

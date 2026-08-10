@@ -187,34 +187,41 @@ inferred from the netlist.
 (datasheet Table 1431: both `USB_DP` and `USB_DM` sit in the `USB_OTP_VDD`
 power domain).
 
-The deviation, stated as the datasheet states it (§6.1.4):
+What the datasheet asks for (§6.1.4):
 
 > "USB_OTP_VDD should be decoupled with a 100nF capacitor close to the chip's
 > USB_OTP_VDD pin."
 
 | | RP reference | Bento 2 |
 |---|---|---|
-| Dedicated 100 nF on pin 68 | **C12, 100 nF @ 1.88 mm** | **none** |
-| Nearest cap on pin 68's net | C6, 4.7 µF @ 1.88 mm | C16, 0.1 µF @ 3.68 mm |
-| Pins that nearest cap also serves | 7 | 6 |
+| Nearest cap to pin 68 | C6, 4.7 µF @ **1.88 mm** | C16, 0.1 µF @ **3.68 mm** |
+| Second nearest | C12, 100 nF @ 4.81 mm | C15, 0.1 µF @ 8.12 mm |
+| Caps within 6 mm of pin 68 | 3 | 1 |
+| Nearest bulk (4.7 µF) | 1.88 mm | 13.76 mm |
+| Caps on the 3V3 rail | 13 | 6 |
 
-RP places **two** caps near pin 68 — a bulk 4.7 µF (C6) *and* a dedicated
-100 nF (C12) at 1.88 mm. Bento has a single shared 0.1 µF (C16) at 3.68 mm
-that simultaneously serves pins 59, 60, 62, 64, 68 and 69. So the deviation is
-not merely "the cap is further away"; **the dedicated high-frequency cap the
-datasheet asks for by name does not exist on this design.**
+**Bento does have a 100 nF on pin 68's net** — C16, at 3.68 mm. The deviation
+is one of degree, not a missing part:
 
-Cap count on the 3V3 rail overall: RP uses 13 caps on `+3V3`, Bento uses 6 on
-`MCU_3V3` for a comparable pin count.
+1. Nearest cap is ~2× further (3.68 mm vs 1.88 mm), so more loop inductance
+   to the closest charge reservoir.
+2. Local bulk is absent: RP's 4.7 µF is 1.88 mm from pin 68, Bento's is
+   13.76 mm. Bento has one cap of any kind within 6 mm; RP has three.
+3. C16 is shared with pins 59, 60, 62, 64 and 69 — including `QSPI_IOVDD`.
 
-**This explains both unexplained observations.** Traffic-independence:
-`QSPI_IOVDD` (pin 69) shares both the rail *and* C16, and XIP flash fetches run
-constantly whether or not USB moves a byte. Unit-to-unit 3× variation: ceramic
-tolerance, DC-bias derating and solder/via variation on a design with no margin
-to absorb it.
+**This is consistent with both unexplained observations**, though it does not
+prove them. Traffic-independence: `QSPI_IOVDD` (pin 69) shares both the rail
+*and* C16, and XIP flash fetches run constantly whether or not USB moves a
+byte. Unit-to-unit 3× variation: ceramic tolerance, DC-bias derating and
+solder/via variation on a design with thin local margin.
+
+Confidence: a real but **modest** deviation. 3.68 mm is not so far as to make
+errors inevitable, and nothing measured here demonstrates causation — this
+remains the leading candidate, not a diagnosis.
 
 **Test (5 minutes):** tack a 100 nF 0402 from pin 68 to its nearest ground via,
-shortest possible leads, and re-measure the CRC rate. This reproduces RP's C12.
+shortest possible leads, and re-measure the CRC rate. Adding local bulk
+(≥1 µF) at the same spot tests item 2 and is the closer analogue of RP's C6.
 
 *Correction to an earlier version of this document:* it claimed "RP's hardware
 design guide calls for 100 nF per supply pin at roughly 1 mm". **That number was
