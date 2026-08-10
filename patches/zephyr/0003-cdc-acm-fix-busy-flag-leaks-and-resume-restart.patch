@@ -1,0 +1,265 @@
+diff --git i/subsys/usb/device_next/class/usbd_cdc_acm.c w/subsys/usb/device_next/class/usbd_cdc_acm.c
+index d3921c0f146..632eb506725 100644
+--- i/subsys/usb/device_next/class/usbd_cdc_acm.c
++++ w/subsys/usb/device_next/class/usbd_cdc_acm.c
+@@ -122,6 +122,16 @@ struct cdc_acm_uart_data {
+ 	struct k_work_delayable tx_fifo_work;
+ 	/* USBD CDC ACM RX fifo work */
+ 	struct k_work rx_fifo_work;
++	/*
++	 * The buffers currently holding the RX/TX busy claims. Completions are
++	 * delivered through a message queue (usbd_event_carrier() is a
++	 * k_msgq_put), so a cancellation from a torn-down configuration can be
++	 * processed after a new configuration has already claimed the flag.
++	 * Comparing the completing buffer against the claim keeps a stale
++	 * abort from releasing someone else's claim.
++	 */
++	struct net_buf *rx_claim;
++	struct net_buf *tx_claim;
+ 	atomic_t state;
+ 	struct k_sem notif_sem;
+ 	struct k_spinlock lock;
+@@ -289,16 +299,41 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+ 				bi->ep, buf->len);
+ 		}
+ 
++		/*
++		 * Release the busy flag only for the buffer that holds the
++		 * claim. Completions are delivered through a message queue, so
++		 * a transfer cancelled during a bus reset is still queued while
++		 * disable()/enable() run; by the time it is processed a fresh
++		 * transfer owns the flag. Releasing on endpoint address alone
++		 * would hand a second concurrent transfer to a design that
++		 * allows only one.
++		 */
+ 		if (bi->ep == cdc_acm_get_bulk_out(c_data)) {
+-			atomic_clear_bit(&data->state, CDC_ACM_RX_FIFO_BUSY);
++			if (data->rx_claim == NULL || data->rx_claim == buf) {
++				data->rx_claim = NULL;
++				atomic_clear_bit(&data->state,
++						 CDC_ACM_RX_FIFO_BUSY);
++			}
+ 		}
+ 
+ 		if (bi->ep == cdc_acm_get_bulk_in(c_data)) {
+-			atomic_clear_bit(&data->state, CDC_ACM_TX_FIFO_BUSY);
++			if (data->tx_claim == NULL || data->tx_claim == buf) {
++				data->tx_claim = NULL;
++				atomic_clear_bit(&data->state,
++						 CDC_ACM_TX_FIFO_BUSY);
++			}
+ 		}
+ 
+ 		if (bi->ep == cdc_acm_get_int_in(c_data)) {
++			/*
++			 * k_sem_reset() sets the count to zero and does NOT
++			 * wake waiters, so a thread blocked in
++			 * cdc_acm_send_notification() stayed blocked forever
++			 * when the notification transfer failed. Give the
++			 * semaphore so the waiter observes the failure.
++			 */
+ 			k_sem_reset(&data->notif_sem);
++			k_sem_give(&data->notif_sem);
+ 		}
+ 
+ 		goto ep_request_error;
+@@ -314,8 +349,18 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+ 			cdc_acm_work_submit(&data->irq_cb_work);
+ 		}
+ 
+-		atomic_clear_bit(&data->state, CDC_ACM_RX_FIFO_BUSY);
+-		cdc_acm_work_submit(&data->rx_fifo_work);
++		/*
++		 * Same claim check as the error path: successful completions
++		 * are queued through the same deferred path, so one that lands
++		 * just before a teardown is processed after a fresh transfer
++		 * has taken the flag. Guarding only cancellation was an
++		 * incomplete fix.
++		 */
++		if (data->rx_claim == NULL || data->rx_claim == buf) {
++			data->rx_claim = NULL;
++			atomic_clear_bit(&data->state, CDC_ACM_RX_FIFO_BUSY);
++			cdc_acm_work_submit(&data->rx_fifo_work);
++		}
+ 	}
+ 
+ 	if (bi->ep == cdc_acm_get_bulk_in(c_data)) {
+@@ -324,11 +369,18 @@ static int usbd_cdc_acm_request(struct usbd_class_data *const c_data,
+ 			cdc_acm_work_submit(&data->irq_cb_work);
+ 		}
+ 
+-		atomic_clear_bit(&data->state, CDC_ACM_TX_FIFO_BUSY);
++		/* Same guard as the RX path above; also clears the claim,
++		 * which this path previously left stale.
++		 */
++		if (data->tx_claim == NULL || data->tx_claim == buf) {
++			data->tx_claim = NULL;
++			atomic_clear_bit(&data->state, CDC_ACM_TX_FIFO_BUSY);
+ 
+-		if (!ring_buf_is_empty(data->tx_fifo.rb)) {
+-			/* Queue pending TX data on IN endpoint */
+-			cdc_acm_work_schedule(&data->tx_fifo_work, K_NO_WAIT);
++			if (!ring_buf_is_empty(data->tx_fifo.rb)) {
++				/* Queue pending TX data on IN endpoint */
++				cdc_acm_work_schedule(&data->tx_fifo_work,
++						      K_NO_WAIT);
++			}
+ 		}
+ 
+ 	}
+@@ -356,10 +408,41 @@ static void usbd_cdc_acm_enable(struct usbd_class_data *const c_data)
+ 	atomic_set_bit(&data->state, CDC_ACM_CLASS_ENABLED);
+ 	LOG_INF("Configuration enabled");
+ 
++	/*
++	 * A transfer in flight when the configuration was torn down is
++	 * cancelled without a completion, leaving its busy flag set. That is
++	 * fatal for RX: every re-arm path test-and-sets the flag, so the
++	 * endpoint is never primed again. A fresh configuration has nothing in
++	 * flight, so clear both.
++	 */
++	atomic_clear_bit(&data->state, CDC_ACM_RX_FIFO_BUSY);
++	atomic_clear_bit(&data->state, CDC_ACM_TX_FIFO_BUSY);
++	data->rx_claim = NULL;
++	data->tx_claim = NULL;
++
++	/*
++	 * Clear a stale suspend: SUSPEND/RESUME are dropped while unconfigured,
++	 * so a resume arriving in the window after a bus reset never clears
++	 * this and both FIFO handlers return early forever. Reaching enable()
++	 * means SET_CONFIGURATION, so we are not suspended.
++	 */
++	atomic_clear_bit(&data->state, CDC_ACM_CLASS_SUSPENDED);
++	data->zlp_needed = false;
++
+ 	if (atomic_test_bit(&data->state, CDC_ACM_IRQ_RX_ENABLED)) {
+ 		cdc_acm_irq_rx_enable(dev);
+ 	}
+ 
++	/*
++	 * Prime reception unconditionally. IRQ_RX_ENABLED is set once by the
++	 * consumer (the shell) and never re-set, so gating the re-arm on it
++	 * means a configuration torn down before the consumer initialises
++	 * leaves the endpoint unarmed with nothing to arm it later. The
++	 * handler re-tests the busy flag, so this is a no-op when a transfer
++	 * is already in flight.
++	 */
++	cdc_acm_work_submit(&data->rx_fifo_work);
++
+ 	if (atomic_test_bit(&data->state, CDC_ACM_IRQ_TX_ENABLED)) {
+ 		if (ring_buf_space_get(data->tx_fifo.rb)) {
+ 			/* Raise TX ready interrupt */
+@@ -369,6 +452,19 @@ static void usbd_cdc_acm_enable(struct usbd_class_data *const c_data)
+ 			cdc_acm_work_schedule(&data->tx_fifo_work, K_NO_WAIT);
+ 		}
+ 	}
++
++	/*
++	 * Drain pending TX, the counterpart of the RX priming above. Every path
++	 * that schedules the TX handler is edge-triggered on an event that has
++	 * already happened, so after a re-enumeration with an idle consumer the
++	 * fifo can hold data with nothing left to schedule the drain. Evaluated
++	 * once per SET_CONFIGURATION on a positive condition, not on idleness;
++	 * the handler re-tests its own guards, so a redundant schedule is a
++	 * no-op.
++	 */
++	if (!ring_buf_is_empty(data->tx_fifo.rb)) {
++		cdc_acm_work_schedule(&data->tx_fifo_work, K_NO_WAIT);
++	}
+ }
+ 
+ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
+@@ -378,6 +474,11 @@ static void usbd_cdc_acm_disable(struct usbd_class_data *const c_data)
+ 
+ 	atomic_clear_bit(&data->state, CDC_ACM_CLASS_ENABLED);
+ 	atomic_clear_bit(&data->state, CDC_ACM_CLASS_SUSPENDED);
++	/* In-flight transfers are gone with the configuration; drop the busy
++	 * flags so a later enable starts from a clean state.
++	 */
++	atomic_clear_bit(&data->state, CDC_ACM_RX_FIFO_BUSY);
++	atomic_clear_bit(&data->state, CDC_ACM_TX_FIFO_BUSY);
+ 	LOG_INF("Configuration disabled");
+ }
+ 
+@@ -396,6 +497,25 @@ static void usbd_cdc_acm_resumed(struct usbd_class_data *const c_data)
+ 	struct cdc_acm_uart_data *data = dev->data;
+ 
+ 	atomic_clear_bit(&data->state, CDC_ACM_CLASS_SUSPENDED);
++
++	/*
++	 * Restart the data path WITHOUT clearing the busy flags. A suspend
++	 * cancels nothing, so a transfer outstanding across it is still queued
++	 * and completes normally; the flags are accurate. Clearing them arms a
++	 * second transfer while the first is in flight, and the outstanding
++	 * count then ratchets up by one per resume until the buffer pool runs
++	 * dry. Both handlers re-test their own busy bit, so kicking them is
++	 * safe.
++	 */
++	if (atomic_test_bit(&data->state, CDC_ACM_IRQ_RX_ENABLED)) {
++		cdc_acm_irq_rx_enable(dev);
++	}
++
++	if (!atomic_test_bit(&data->state, CDC_ACM_RX_FIFO_BUSY)) {
++		cdc_acm_work_submit(&data->rx_fifo_work);
++	}
++
++	cdc_acm_work_schedule(&data->tx_fifo_work, K_NO_WAIT);
+ }
+ 
+ static void *usbd_cdc_acm_get_desc(struct usbd_class_data *const c_data,
+@@ -663,11 +783,23 @@ static void cdc_acm_tx_fifo_handler(struct k_work *work)
+ 
+ 	data->zlp_needed = len != 0 && len % cdc_acm_get_bulk_mps(c_data) == 0;
+ 
++	/* Record which buffer owns the TX claim; see usbd_cdc_acm_request(). */
++	data->tx_claim = buf;
+ 	ret = usbd_ep_enqueue(c_data, buf);
+ 	if (ret) {
+ 		LOG_ERR("Failed to enqueue");
+ 		net_buf_unref(buf);
++		data->tx_claim = NULL;
+ 		atomic_clear_bit(&data->state, CDC_ACM_TX_FIFO_BUSY);
++		/*
++		 * Reschedule, as the alloc-failure path above does. Releasing
++		 * the flag alone leaves whatever is still in tx_fifo with no
++		 * work item to send it: the completion re-arm cannot fire
++		 * (nothing is in flight) and the irq_cb re-arm requires
++		 * tx_fifo.altered, which only a fresh fifo_fill sets. An idle
++		 * shell with queued output would stall indefinitely.
++		 */
++		cdc_acm_work_schedule(&data->tx_fifo_work, K_MSEC(1));
+ 	}
+ }
+ 
+@@ -709,17 +841,31 @@ static void cdc_acm_rx_fifo_handler(struct k_work *work)
+ 
+ 	buf = cdc_acm_buf_alloc(c_data, cdc_acm_get_bulk_out(c_data));
+ 	if (buf == NULL) {
++		/*
++		 * CDC_ACM_RX_FIFO_BUSY was claimed above but no transfer was
++		 * submitted, so no completion will ever arrive to release it.
++		 * Leaving it set makes every later call to this handler return
++		 * early at the test-and-set, so reception is never re-armed and
++		 * the port silently stops accepting input for the rest of the
++		 * session. Release it and retry shortly.
++		 */
++		atomic_clear_bit(&data->state, CDC_ACM_RX_FIFO_BUSY);
++		cdc_acm_work_submit(&data->rx_fifo_work);
+ 		return;
+ 	}
+ 
+ 	/* Shrink the buffer size if operating on a full speed bus */
+ 	buf->size = MIN(cdc_acm_get_bulk_mps(c_data), buf->size);
+ 
++	data->rx_claim = buf;
+ 	ret = usbd_ep_enqueue(c_data, buf);
+ 	if (ret) {
+ 		LOG_ERR("Failed to enqueue net_buf for 0x%02x",
+ 			cdc_acm_get_bulk_out(c_data));
+ 		net_buf_unref(buf);
++		/* Same as above: nothing is in flight, so release the claim. */
++		data->rx_claim = NULL;
++		atomic_clear_bit(&data->state, CDC_ACM_RX_FIFO_BUSY);
+ 	}
+ }
+ 
