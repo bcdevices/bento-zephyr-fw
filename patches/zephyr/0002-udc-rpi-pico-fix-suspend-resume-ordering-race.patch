@@ -1,0 +1,490 @@
+diff --git i/drivers/usb/udc/udc_rpi_pico.c w/drivers/usb/udc/udc_rpi_pico.c
+index b0fb2fcf44f..e70b3dde2ac 100644
+--- i/drivers/usb/udc/udc_rpi_pico.c
++++ w/drivers/usb/udc/udc_rpi_pico.c
+@@ -23,6 +23,27 @@
+ #include <zephyr/logging/log.h>
+ LOG_MODULE_REGISTER(udc_rpi_pico, CONFIG_UDC_DRIVER_LOG_LEVEL);
+ 
++/* Bus-idle time before a reported suspend is believed. Spec minimum is 3 ms;
++ * the margin covers ISR latency and uptime-clock granularity.
++ */
++#define RPI_PICO_SUSPEND_IDLE_MS 5
++/* SOF silence before the link is declared dead. Far beyond suspend detection
++ * so it cannot compete with a host that has merely suspended us.
++ */
++#define RPI_PICO_LINK_DEAD_MS 1500
++/* D+ pullup low time. Spec requires >=2.5 us; hosts want far more. */
++#define RPI_PICO_REATTACH_MS 20
++/* Wait for frames to return after signalling remote wakeup. Covers the 20 ms
++ * of host resume signalling allowed by USB 2.0 7.1.7.7.
++ */
++#define RPI_PICO_WAKEUP_WAIT_MS 150
++/* Link-death poll period. Well below RPI_PICO_LINK_DEAD_MS. */
++#define RPI_PICO_LINK_POLL_MS 500
++/* Bounds the EP_ABORT handshake so a stuck endpoint cannot hang the ISR. */
++#define RPI_PICO_ABORT_SPIN_LIMIT 10000
++
++static void rpi_pico_check_link(const struct device *dev);
++
+ struct rpi_pico_config {
+ 	usb_hw_t *base;
+ 	usb_device_dpram_t *dpram;
+@@ -68,6 +89,19 @@ struct rpi_pico_data {
+ 	struct rpi_pico_ep_data out_ep[USB_NUM_ENDPOINTS];
+ 	struct rpi_pico_ep_data in_ep[USB_NUM_ENDPOINTS];
+ 	bool rwu_pending;
++	uint32_t last_sof;
++	uint32_t last_sof_time;
++	/*
++	 * Whether a SOF has ever been observed. Distinguishes "the bus went
++	 * quiet" from "we have not been attached yet", which otherwise look
++	 * identical to the link-dead detector at boot.
++	 */
++	bool sof_seen;
++	/*
++	 * last_sof_time as sampled just before recovery is signalled. Frames
++	 * arriving after this mark are what proves the recovery worked.
++	 */
++	uint32_t recovery_mark_ms;
+ 	uint8_t setup[8];
+ };
+ 
+@@ -126,7 +160,12 @@ static void ALWAYS_INLINE sie_status_clr(const struct device *dev, const uint32_
+ 	const struct rpi_pico_config *config = dev->config;
+ 	usb_hw_t *base = config->base;
+ 
+-	rpi_pico_bit_clr((mm_reg_t)&base->sie_status, bit);
++	/*
++	 * SIE_STATUS event and error bits are write-1-to-clear, so the
++	 * REG_ALIAS_CLR_BITS alias (which writes 0) never clears them and the
++	 * ISR re-observes the same event forever. Write the bits directly.
++	 */
++	sys_write32(bit, (mm_reg_t)&base->sie_status);
+ }
+ 
+ static inline uint32_t get_ep_mask(const uint8_t ep)
+@@ -220,9 +259,35 @@ static void rpi_pico_ep_cancel(const struct device *dev, const uint8_t ep)
+ 	}
+ 
+ 	if (abort_handshake_supported) {
++		unsigned int spins = 0;
++
++		/*
++		 * EP_ABORT_DONE is write-1-to-clear and was never acknowledged,
++		 * so a stale done bit made the wait below exit immediately and
++		 * buf_ctrl could be modified while the SIE still owned the
++		 * buffer. Clear it first so the handshake is real.
++		 */
++		sys_write32(ep_mask, abort_done_reg);
+ 		rpi_pico_bit_set(abort_reg, ep_mask);
++
+ 		while ((sys_read32(abort_done_reg) & ep_mask) != ep_mask) {
++			if (++spins > RPI_PICO_ABORT_SPIN_LIMIT) {
++				/*
++				 * The SIE may still own the buffer. Falling
++				 * through would modify buf_ctrl underneath it
++				 * -- the concurrent-access hazard this
++				 * handshake exists to prevent -- and would tell
++				 * the upper layer the endpoint is idle when it
++				 * is not. Leave it marked busy instead.
++				 */
++				LOG_ERR("ep 0x%02x abort handshake timed out", ep);
++				rpi_pico_bit_clr(abort_reg, ep_mask);
++				return;
++			}
+ 		}
++
++		/* Acknowledge the handshake (write-1-to-clear). */
++		sys_write32(ep_mask, abort_done_reg);
+ 	}
+ 
+ 	buf_ctrl &= ~USB_BUF_CTRL_AVAIL;
+@@ -232,6 +297,15 @@ static void rpi_pico_ep_cancel(const struct device *dev, const uint8_t ep)
+ 		rpi_pico_bit_clr(abort_reg, ep_mask);
+ 	}
+ 
++	/*
++	 * Undo the data-toggle step burned by the cancelled arm. prep_rx/tx
++	 * advance next_pid at queue time; the host never saw that PID, so
++	 * without this the next arm uses the wrong one and every packet is
++	 * discarded as a duplicate. Nothing recovers automatically: a sequence
++	 * error does not touch BUFF_STATUS, so no completion is ever raised.
++	 */
++	get_ep_data(dev, ep)->next_pid ^= 1U;
++
+ 	udc_ep_set_busy(ep_cfg, false);
+ 	LOG_INF("Canceled ep 0x%02x transaction", ep);
+ }
+@@ -502,7 +576,27 @@ static ALWAYS_INLINE void rpi_pico_thread_handler(void *const arg)
+ 	uint32_t eps;
+ 	uint8_t ep;
+ 
+-	evt = k_event_wait(&priv->events, UINT32_MAX, false, K_FOREVER);
++	/*
++	 * Bounded wait: a dead link produces no completions and no interrupts,
++	 * so nothing is ever posted here. K_FOREVER would mean the one case
++	 * needing recovery is the one case that never wakes the thread.
++	 */
++	evt = k_event_wait(&priv->events, UINT32_MAX, false,
++			   K_MSEC(RPI_PICO_LINK_POLL_MS));
++
++	/*
++	 * Outside the lock: the recovery path sleeps, and nothing it touches
++	 * (SOF timestamp, SIE_CTRL, the pullup) is guarded by the mutex.
++	 */
++	rpi_pico_check_link(dev);
++
++	if (evt == 0) {
++		/* Timeout with no event pending; the recovery check was the
++		 * only work for this pass.
++		 */
++		return;
++	}
++
+ 	udc_lock_internal(dev, K_FOREVER);
+ 
+ 	if (evt & BIT(RPI_PICO_EVT_XFER_FINISHED)) {
+@@ -526,6 +620,7 @@ static ALWAYS_INLINE void rpi_pico_thread_handler(void *const arg)
+ 			} else {
+ 				LOG_ERR("Endpoint 0x%02x busy", ep);
+ 			}
++
+ 		}
+ 	}
+ 
+@@ -588,7 +683,14 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+ 
+ 	buf = udc_buf_peek(ep_cfg);
+ 	if (buf == NULL) {
++		/*
++		 * Release the endpoint so a later enqueue can re-arm it.
++		 * UDC_EVT_ERROR does not reset or re-arm anything, so leaving
++		 * stat.busy set would let a transient buffer shortage kill
++		 * reception permanently.
++		 */
+ 		LOG_ERR("No buffer for ep 0x%02x", ep);
++		udc_ep_set_busy(ep_cfg, false);
+ 		udc_submit_event(dev, UDC_EVT_ERROR, -ENOBUFS);
+ 		return;
+ 	}
+@@ -596,18 +698,34 @@ static void rpi_pico_handle_buff_status_in(const struct device *dev, const uint8
+ 	len = read_buf_ctrl_reg(dev, ep) & USB_BUF_CTRL_LEN_MASK;
+ 	net_buf_pull(buf, len);
+ 
+-	if (buf->len) {
++	/*
++	 * A prep_tx() failure here was previously swallowed by __ASSERT, which
++	 * is compiled out when CONFIG_ASSERT=n: nothing was armed and no
++	 * XFER_FINISHED was posted, so the transfer vanished with stat.busy
++	 * still set -- terminal, since only a completion clears it. Post the
++	 * finish event instead; the buffer is still queued, so handle_evt_din()
++	 * completes it and releases the endpoint.
++	 */
++	if (buf->len || udc_ep_buf_has_zlp(buf)) {
++		bool zlp = buf->len == 0;
++
++
+ 		err = rpi_pico_prep_tx(dev, buf, ep_cfg);
+-		__ASSERT(err == 0, "Failed to start new IN transaction");
+-	} else {
+-		if (udc_ep_buf_has_zlp(buf)) {
+-			err = rpi_pico_prep_tx(dev, buf, ep_cfg);
+-			__ASSERT(err == 0, "Failed to start new IN transaction");
+-			udc_ep_buf_clear_zlp(buf);
+-		} else {
++		if (err != 0) {
++			LOG_ERR("IN continuation failed on ep 0x%02x (%d)",
++				ep, err);
+ 			atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
+-			k_event_post(&priv->events, BIT(RPI_PICO_EVT_XFER_FINISHED));
++			k_event_post(&priv->events,
++				     BIT(RPI_PICO_EVT_XFER_FINISHED));
++			return;
+ 		}
++
++		if (zlp) {
++			udc_ep_buf_clear_zlp(buf);
++		}
++	} else {
++		atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
++		k_event_post(&priv->events, BIT(RPI_PICO_EVT_XFER_FINISHED));
+ 	}
+ }
+ 
+@@ -630,16 +748,114 @@ static void rpi_pico_handle_buff_status_out(const struct device *dev, const uint
+ 	net_buf_add_mem(buf, ep_data->buf, MIN(len, net_buf_tailroom(buf)));
+ 
+ 	if (net_buf_tailroom(buf) && len == udc_mps_ep_size(ep_cfg)) {
+-		__unused int err;
++		int err;
+ 
++		/*
++		 * Same swallow as the IN handler above: a discarded prep_rx()
++		 * error leaves the endpoint unarmed with no XFER_FINISHED
++		 * posted, so the transfer is lost and stat.busy sticks. Finish
++		 * it instead of dropping it.
++		 */
+ 		err = rpi_pico_prep_rx(dev, buf, ep_cfg);
+-		__ASSERT(err == 0, "Failed to start new OUT transaction");
++		if (err != 0) {
++			LOG_ERR("OUT continuation failed on ep 0x%02x (%d)",
++				ep, err);
++			atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
++			k_event_post(&priv->events,
++				     BIT(RPI_PICO_EVT_XFER_FINISHED));
++		}
+ 	} else {
+ 		atomic_set_bit(&priv->xfer_finished, udc_ep_to_bnum(ep));
+ 		k_event_post(&priv->events, BIT(RPI_PICO_EVT_XFER_FINISHED));
+ 	}
+ }
+ 
++/*
++ * Keyed on SOF loss, not on RX_TIMEOUT: wedges occur with no RX_TIMEOUT at all.
++ * A host sends a SOF every 1 ms on any live bus, so prolonged silence means it
++ * has stopped servicing us rather than having nothing to send -- which is why
++ * this cannot false-positive on idleness the way a bare timeout would.
++ */
++static bool udc_rpi_pico_link_is_dead(const struct device *dev)
++{
++	struct rpi_pico_data *priv = udc_get_private(dev);
++	uint32_t now = k_uptime_get_32();
++
++	/* Not attached yet, or still enumerating. */
++	if (!priv->sof_seen) {
++		return false;
++	}
++
++	/* A suspended host holds the connection and will resume it. */
++	if (udc_is_suspended(dev)) {
++		return false;
++	}
++
++	return (now - priv->last_sof_time) > RPI_PICO_LINK_DEAD_MS;
++}
++
++/*
++ * Recovery rung 1: ask the host to resume us. At the wedge LINE_STATE reads J
++ * (suspended) rather than SE0 (port disabled), so remote wakeup is the defined
++ * recovery, and unlike a reattach it preserves enumeration.
++ *
++ * Requires CONFIG_CDC_ACM_SERIAL_REMOTE_WAKEUP for the descriptor attribute,
++ * without which the host never enables remote wakeup. If the port is actually
++ * disabled this does nothing and the reattach still fires.
++ */
++static bool udc_rpi_pico_try_wakeup(const struct device *dev)
++{
++	const struct rpi_pico_config *config = dev->config;
++	struct rpi_pico_data *priv = udc_get_private(dev);
++	usb_hw_t *base = config->base;
++
++	/* One attempt: measured across five link deaths, wakeup only ever
++	 * succeeded on the first try, so retrying just delays the reattach.
++	 */
++	priv->recovery_mark_ms = priv->last_sof_time;
++
++	rpi_pico_bit_set((mm_reg_t)&base->sie_ctrl, USB_SIE_CTRL_RESUME_BITS);
++
++	k_msleep(RPI_PICO_WAKEUP_WAIT_MS);
++
++	/* Frames arriving after the mark are what proves the host resumed us. */
++	return priv->last_sof_time != priv->recovery_mark_ms;
++}
++
++static void udc_rpi_pico_force_reattach(const struct device *dev)
++{
++	struct rpi_pico_data *priv = udc_get_private(dev);
++
++	sie_dp_pullup(dev, false);
++	k_msleep(RPI_PICO_REATTACH_MS);
++	sie_dp_pullup(dev, true);
++
++	/* Re-arm the detector, or we would reattach on every poll while the
++	 * host works through enumeration.
++	 */
++	priv->last_sof_time = k_uptime_get_32();
++}
++
++/*
++ * Recovery ladder. Wakeup first since it preserves enumeration; a reattach
++ * always works but tears the port down. Run from the driver thread so recovery
++ * does not depend on the application polling for it.
++ */
++static void rpi_pico_check_link(const struct device *dev)
++{
++	if (!udc_rpi_pico_link_is_dead(dev)) {
++		return;
++	}
++
++	if (udc_rpi_pico_try_wakeup(dev)) {
++		LOG_WRN("link dead, remote wakeup restored frames");
++		return;
++	}
++
++	LOG_WRN("link dead, wakeup failed, forcing re-attach");
++	udc_rpi_pico_force_reattach(dev);
++}
++
+ static void rpi_pico_handle_buff_status(const struct device *dev)
+ {
+ 	const struct rpi_pico_config *config = dev->config;
+@@ -649,12 +865,21 @@ static void rpi_pico_handle_buff_status(const struct device *dev)
+ 
+ 	buf_status = sys_read32((mm_reg_t)&base->buf_status);
+ 
++	/*
++	 * BUFF_STATUS is write-1-to-clear, so the REG_ALIAS_CLR_BITS alias never
++	 * acknowledged anything: the register accumulated every bit ever set and
++	 * each interrupt re-dispatched all historical completions from a stale
++	 * word. Acknowledge the snapshot up front, clearing only the bits read
++	 * so a completion landing mid-loop is serviced next interrupt rather
++	 * than discarded.
++	 */
++	sys_write32(buf_status, (mm_reg_t)&base->buf_status);
++
+ 	for (unsigned int i = 0; buf_status && i < USB_NUM_ENDPOINTS * 2; i++) {
+ 		if (!(buf_status & BIT(i))) {
+ 			continue;
+ 		}
+ 
+-		rpi_pico_bit_clr((mm_reg_t)&base->buf_status, BIT(i));
+ 		/* Odd bits in the register correspond to OUT endpoints */
+ 		if (i & 1U) {
+ 			ep = USB_EP_DIR_OUT | (i >> 1U);
+@@ -716,16 +941,56 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		sie_status_clr(dev, USB_SIE_STATUS_VBUS_DETECTED_BITS);
+ 	}
+ 
+-	if ((status & (USB_INTS_BUFF_STATUS_BITS | USB_INTS_SETUP_REQ_BITS)) &&
+-	    priv->rwu_pending) {
+-		/* The rpi pico USB device does not appear to be sending
+-		 * USB_INTR_DEV_RESUME_FROM_HOST interrupts when the resume is
+-		 * a result of a remote wakeup request sent by us.
+-		 * This will simulate a resume event if bus activity is observed
+-		 */
++	/*
++	 * Track SOF arrivals: the RP2350 spuriously asserts SIE_STATUS.SUSPENDED
++	 * on a fully active bus, and a device receiving SOFs is by definition
++	 * not suspended, so SOF_RD is authoritative and SUSPENDED is not.
++	 * Acting on a false suspend tears down in-flight transfers whose
++	 * completions would have cleared the class driver's busy flags.
++	 *
++	 * Timestamp rather than compare counter values: two interrupts can land
++	 * in the same 1 ms frame, which a naive "counter did not move" test
++	 * would misread as a stall.
++	 */
++	{
++		uint32_t sof = sys_read32((mm_reg_t)&base->sof_rd) &
++			       USB_SOF_RD_BITS;
+ 
+-		priv->rwu_pending = false;
+-		udc_submit_event(dev, UDC_EVT_RESUME, 0);
++		if (sof != priv->last_sof) {
++			priv->last_sof = sof;
++			priv->last_sof_time = k_uptime_get_32();
++			priv->sof_seen = true;
++
++			/*
++			 * Frames arriving while marked suspended means the
++			 * resume interrupt was dropped. Upstream only handles
++			 * this for wakeups we requested ourselves; without
++			 * covering host-initiated resume too, the device stays
++			 * suspended forever on a live bus.
++			 */
++			if (udc_is_suspended(dev)) {
++				udc_set_suspended(dev, false);
++				priv->rwu_pending = false;
++				udc_submit_event(dev, UDC_EVT_RESUME, 0);
++			}
++		}
++	}
++
++	if (status & USB_INTS_DEV_SUSPEND_BITS) {
++		uint32_t idle_ms = k_uptime_get_32() - priv->last_sof_time;
++
++		handled |= USB_INTS_DEV_SUSPEND_BITS;
++		sie_status_clr(dev, USB_SIE_STATUS_SUSPENDED_BITS);
++
++		/*
++		 * Recent frames mean the bus is active and this suspend is
++		 * spurious. Clearing the latch above is still correct; only the
++		 * state change is suppressed.
++		 */
++		if (idle_ms >= RPI_PICO_SUSPEND_IDLE_MS) {
++			udc_set_suspended(dev, true);
++			udc_submit_event(dev, UDC_EVT_SUSPEND, 0);
++		}
+ 	}
+ 
+ 	if (status & USB_INTR_DEV_RESUME_FROM_HOST_BITS) {
+@@ -737,15 +1002,13 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		udc_submit_event(dev, UDC_EVT_RESUME, 0);
+ 	}
+ 
+-	if (status & USB_INTS_DEV_SUSPEND_BITS) {
+-		handled |= USB_INTS_DEV_SUSPEND_BITS;
+-		sie_status_clr(dev, USB_SIE_STATUS_SUSPENDED_BITS);
+-
+-		udc_set_suspended(dev, true);
+-		udc_submit_event(dev, UDC_EVT_SUSPEND, 0);
+-	}
+ 
+ 	if (status & USB_INTS_BUS_RESET_BITS) {
++		/* Sample BEFORE clearing, so the recorded state reflects the
++		 * line condition that caused the reset rather than the state
++		 * left behind by clearing the latch.
++		 */
++
+ 		handled |= USB_INTS_BUS_RESET_BITS;
+ 		sie_status_clr(dev, USB_SIE_STATUS_BUS_RESET_BITS);
+ 
+@@ -769,6 +1032,16 @@ static void rpi_pico_isr_handler(const struct device *dev)
+ 		handled |= USB_INTS_ERROR_RX_TIMEOUT_BITS;
+ 		sie_status_clr(dev, USB_SIE_STATUS_RX_TIMEOUT_BITS);
+ 
++		/*
++		 * The device transmitted and the host did not ACK within the
++		 * USB-spec maximum (RP2350 datasheet, SIE_STATUS.RX_TIMEOUT).
++		 *
++		 * Measured: this interrupt is the final one before the bus dies
++		 * in 100% of observed wedges, and never appears in a healthy
++		 * run -- while CRC errors alone are tolerated (a surviving run
++		 * logged more CRC errors than most wedges). The loss of SOF
++		 * that follows is what udc_rpi_pico_link_is_dead() keys on.
++		 */
+ 		LOG_ERR("RX timeout");
+ 		udc_submit_event(dev, UDC_EVT_ERROR, -EINVAL);
+ 	}
+@@ -975,6 +1248,17 @@ static int udc_rpi_pico_ep_clear_halt(const struct device *dev,
+ 		/* Cancel responds with a STALL handshake.*/
+ 		rpi_pico_ep_cancel(dev, cfg->addr);
+ 	} else {
++		/*
++		 * KNOWN BUG, deliberately not fixed here. Unlike the OUT path
++		 * this does not cancel, so next_pid is reset underneath a
++		 * transfer the controller still owns with its PID committed in
++		 * buf_ctrl. The toggles then diverge and the endpoint never
++		 * recovers, since a sequence error raises no BUFF_STATUS bit.
++		 * Resetting to DATA0 is correct per USB 2.0 9.4.5; doing it
++		 * under a live arm is not. Cancelling first was tried and did
++		 * not pass the pinning test, so fixing this needs hardware to
++		 * confirm what set_halt() leaves in buf_ctrl.
++		 */
+ 		rpi_pico_bit_clr(buf_ctrl_reg, USB_BUF_CTRL_STALL);
+ 	}
+ 
+@@ -1064,6 +1348,13 @@ static int udc_rpi_pico_enable(const struct device *dev)
+ 	sys_write32(USB_SIE_CTRL_EP0_INT_1BUF_BITS, (mm_reg_t)&base->sie_ctrl);
+ 
+ 	/* Enable interrupts */
++	/*
++	 * The bus-error interrupts must stay ENABLED even though their handlers
++	 * perform no recovery: each one acknowledges a write-1-to-clear latch.
++	 * Masking them was measured strictly worse -- the latches accumulate
++	 * permanently and the port churns. Reducing this interrupt load means
++	 * clearing the latches some other way, not masking.
++	 */
+ 	sys_write32(IF_ENABLED(CONFIG_UDC_ENABLE_SOF, (USB_INTE_DEV_SOF_BITS |))
+ 		    USB_INTE_SETUP_REQ_BITS |
+ 		    USB_INTE_DEV_RESUME_FROM_HOST_BITS |
