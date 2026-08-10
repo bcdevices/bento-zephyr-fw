@@ -2,8 +2,9 @@
 
 Out-of-tree patches applied to the Zephyr source before building. They are
 applied by `patches/apply-patches.sh` (invoked from the `Makefile` build
-targets) and are idempotent — re-running is safe. Patches are generated
-against pristine Zephyr 4.3.0.
+targets) and are idempotent — re-running is safe.
+
+Current patches are generated against Zephyr 4.3.0.
 
 ## 0001-ws2812-pio-set-rp2350-gpio-base-for-high-bank-pins.patch
 
@@ -13,14 +14,6 @@ RP2350 PIO GPIOBASE. On the RP2350 the PIO can only address a 32-pin window,
 selected by GPIOBASE (0 → GPIO 0-31, or 16 → GPIO 16-47). As a result a
 data pin in the high GPIO bank (>= 32) is both numbered wrong and outside
 the PIO window, so the LED never lights.
-
-On the Bento boards the WS2812 (LTST-E683CEGBW) RGB LED data pin is:
-
-  - Bento1: GPIO36 (gpio0_hi pin 4) — high bank, needs GPIOBASE = 16
-  - Bento2: GPIO14 (gpio0_lo pin 14) — low bank, GPIOBASE = 0
-  - PER-401 "Flashr": GPIO43 — high bank, needs GPIOBASE = 16
-
-The patch:
 
   1. Computes the absolute GPIO number (`gpio_port_offset` = port_reg * 32,
      added to the relative pin) and uses it everywhere the driver programs
@@ -34,12 +27,6 @@ The patch:
 All RP2350-specific code is guarded by `CONFIG_SOC_SERIES_RP2350`, so other
 SoCs are unaffected. Because GPIOBASE is chosen dynamically, the same driver
 works for both the high-bank (Bento1) and low-bank (Bento2) data pins.
-
-This is the Bento-2 adaptation of the PER-401 "Flashr" fix
-(`0002-ws2812-pio-fix-gpio-pin-for-split-gpio-banks.patch` in plt-flash-os),
-which hardcoded GPIOBASE = 16 because that board only has a high-bank data
-pin; here the base is data-driven so a single build of the driver serves
-both boards.
 
 ## 0002-udc-rpi-pico-fix-suspend-resume-ordering-race.patch
 
@@ -102,30 +89,32 @@ resume so the device does not stay suspended forever on a live bus.
 `EP_ABORT_DONE`. The wait is now bounded; on timeout the endpoint is left
 marked busy rather than modifying `buf_ctrl` underneath the SIE.
 
-### No logging on the per-packet ISR error paths
+### Benign line errors are not escalated
 
-Stock Zephyr 4.3.0 logs from five line-error paths inside
-`rpi_pico_isr_handler()`: CRC, bit stuff, RX overflow, RX timeout and data
-sequence. These are per-packet paths, and this hardware carries a sustained CRC
-error rate, so on a busy or marginal link they fire at line rate — putting
-message allocation and formatting in the interrupt path.
+Stock Zephyr 4.3.0 treats every line error as a reportable fault, from five
+paths inside `rpi_pico_isr_handler()`: CRC, bit stuff, RX overflow, RX timeout
+and data sequence. Each logs, and each raises `UDC_EVT_ERROR`. These are
+per-packet paths, and one board sustains roughly 10 CRC errors/second on a
+link that is passing data normally, so both fire at line rate. This is a lot of
+logging and event generation happening in the ISR context; logs have been removed here.
 
-In the default deferred log mode each record is allocated in the ISR and queued
-for the log thread, and `CONFIG_LOG_MODE_OVERFLOW` then drops it under exactly
-the pressure that produced it, so the cost buys nothing. Every one of these
-paths already reports the failure through `udc_submit_event(UDC_EVT_ERROR)`,
-which is the channel the upper layers act on; the log line was duplication.
+Also `UDC_EVT_ERROR` is removed from the CRC, bit-stuff and data-sequence paths.
+These errors are absorbed by the protocol level. No software recovery is needed.
+`usbd_core`'s handler only logs and publishes a message. RX_TIMEOUT and
+RX_OVERFLOW keep the event: they are rare, and RX_TIMEOUT is the measured
+precursor to a link death.
 
-The patch removes those five calls. Logging is retained on the bounded paths —
-the abort-handshake timeout, the unhandled-IRQ case and link recovery — which
-fire once per failure rather than once per packet.
+The interrupts themselves stay **enabled**. Each handler also clears a
+write-1-to-clear latch.
+
+Logging is retained on the bounded paths — the abort-handshake timeout, the
+unhandled-IRQ case and link recovery — which fire once per failure rather than
+once per packet.
 
 ### Link recovery
 
 If SOFs stop arriving for `RPI_PICO_LINK_DEAD_MS` while the device is not
-suspended, the host has stopped servicing the port. A host sends a SOF every
-1 ms on any live bus, so this is a positive signal rather than an idleness
-heuristic — real host suspend is excluded explicitly.
+suspended, the host has stopped servicing the port.
 
 Recovery is a two-rung ladder exposed to the application:
 
@@ -136,25 +125,6 @@ Recovery is a two-rung ladder exposed to the application:
   - `udc_rpi_pico_force_reattach()` drops the D+ pullup briefly to force
     re-enumeration. This is the last resort and always works, at the cost of
     tearing down the port.
-
-`udc_rpi_pico_link_is_dead()` is the predicate that drives the ladder. Note
-that remote wakeup succeeds only sometimes; the reattach is what actually
-guarantees recovery.
-
-### Evidence
-
-Measured on Bento2 (RP2350B / M33) against pristine Zephyr 4.3.0, driving the
-USB shell from a host script and counting transactions until the port stopped
-responding:
-
-| Pacing between transactions | Stock 4.3.0 | With this patch |
-|---|---|---|
-| 0.3 s | died at 17 | 60 transactions, no failure |
-| 1.0 s | died at 4 | 6 / 20 / 29 across runs |
-
-Slower pacing failing *sooner* is the signature that identified the ordering
-race: more idle gaps means more suspend/resume pairs and more chances to hit
-it. Every load-based explanation predicts the opposite.
 
 ## 0003-cdc-acm-fix-busy-flag-leaks-and-resume-restart.patch
 
@@ -170,7 +140,6 @@ single-transfer design.
     the completion path would have cleared stays set. `usbd_cdc_acm_enable()`
     and `usbd_cdc_acm_disable()` now clear both flags; a fresh configuration
     has nothing in flight by definition.
-
   - **Wrong-buffer release.** Completions are delivered through a message
     queue, so a cancelled transfer's `-ECONNABORTED` is still queued while the
     reset runs. By the time it is processed, `disable()` has released the flag
@@ -178,19 +147,16 @@ single-transfer design.
     endpoint address alone therefore freed another transfer's claim. Both the
     error and success paths now track which buffer holds the claim
     (`rx_claim` / `tx_claim`) and release only for that buffer.
-
   - **Stale suspend.** `usbd_class_bcast_event()` drops SUSPEND and RESUME
     while the device is not configured, so a suspend whose matching resume
     arrived during the unconfigured window after a bus reset left
     `CDC_ACM_CLASS_SUSPENDED` set forever. Both FIFO handlers return early
     while it is set. `enable()` now clears it — reaching `enable()` means the
     host has just issued SET_CONFIGURATION.
-
   - **Lost notification waiter.** `k_sem_reset()` zeroes the count without
     waking waiters, so a thread blocked in `cdc_acm_send_notification()`
     stayed blocked forever when the notification transfer failed. The
     semaphore is now given so the waiter observes the failure.
-
   - **Unprimed data path after enumeration.** RX priming was gated on
     `CDC_ACM_IRQ_RX_ENABLED`, which the consumer sets once and never re-sets,
     so a configuration torn down before the consumer initialises left the
@@ -201,7 +167,6 @@ single-transfer design.
     nothing would ever schedule the handler again. Both are now primed
     unconditionally on enumeration. The handlers re-test their guards, so
     this is a no-op when a transfer is already in flight.
-
     This is level-triggered on the enumeration event — evaluated once per
     SET_CONFIGURATION on the positive fact that `tx_fifo` is non-empty. It is
     not an idleness or timeout heuristic; nothing here runs while the link is
