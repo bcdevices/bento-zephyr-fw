@@ -1,0 +1,35 @@
+#
+# Copyright (c) 2026 Blue Clover Devices
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# West manifest for CI. Pulls in upstream Zephyr at the same revision the
+# Makefile's `prereq` target uses (ZEPHYR_TAG), and imports Zephyr's own
+# manifest so the required modules (hal_rpi_pico, cmsis, ...) come along.
+#
+# Local development still uses `make prereq`, which creates the
+# zephyrproject/ workspace directly. This manifest exists so CI can build
+# a workspace with only the modules the build actually needs.
+#
+
+manifest:
+  remotes:
+    - name: upstream
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: upstream
+      revision: v4.3.0
+      import:
+        # Only the modules needed to build for the RP2350B board. Importing
+        # the full module list pulls in every vendor HAL, which is a large
+        # download and is what exhausts the runner's disk.
+        name-allowlist:
+          - cmsis
+          - cmsis_6
+          - hal_rpi_pico
+          - picolibc
+
+  self:
+    path: .
