@@ -1,0 +1,122 @@
+#
+# Copyright (c) 2026 Blue Clover Devices
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Builds the Bento2 demo app and blinky, and archives the resulting hex
+# images as bento_app.hex and bento_blinky.hex.
+#
+
+name: Build Bento2
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  BOARD: bento2
+  # Must match ZEPHYR_TAG in the Makefile.
+  ZEPHYR_TAG: 4.3.0
+
+jobs:
+  build:
+    name: Build app + blinky
+    runs-on: ubuntu-latest
+
+    # The Zephyr CI image ships the Zephyr SDK and west preinstalled.
+    # v0.28.6 carries SDK 0.17.4, which is the version Zephyr 4.3.0
+    # pins in its SDK_VERSION file.
+    container:
+      image: zephyrprojectrtos/ci:v0.28.6
+      options: --user root
+
+    env:
+      # The image sets ZEPHYR_TOOLCHAIN_VARIANT=zephyr but leaves the SDK
+      # path implicit (it is registered in the CMake package registry).
+      # Setting it explicitly keeps the build from depending on that.
+      ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+      ZEPHYR_SDK_INSTALL_DIR: /opt/toolchains/zephyr-sdk-0.17.4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # GIT-VERSION-GEN uses `git describe --tags`, which needs the
+          # full history and tags rather than a shallow clone.
+          fetch-depth: 0
+
+      - name: Mark workspace as a safe git directory
+        # The container runs as root while the checkout is owned by the
+        # runner user; without this git refuses to read the repo, which
+        # breaks both GIT-VERSION-GEN and the app_version.h git describe.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache Zephyr workspace
+        uses: actions/cache@v4
+        with:
+          path: zephyrproject
+          key: zephyr-${{ env.ZEPHYR_TAG }}-${{ hashFiles('patches/zephyr/*.patch') }}
+          restore-keys: |
+            zephyr-${{ env.ZEPHYR_TAG }}-
+
+      - name: Initialize Zephyr workspace
+        # `west init` fails if the workspace was restored from cache, so
+        # only initialize when it is absent. `west update` is always run
+        # to reconcile a partially cached tree.
+        run: |
+          set -eu
+          if [ ! -d zephyrproject/.west ]; then
+            install -d zephyrproject
+            cd zephyrproject
+            west init --mr "v${ZEPHYR_TAG}"
+          else
+            cd zephyrproject
+          fi
+          west update --narrow -o=--depth=1
+          west zephyr-export
+
+      - name: Install Zephyr Python requirements
+        # The image ships a venv (/opt/python/venv, already on PATH) with
+        # west and Zephyr's requirements preinstalled against Zephyr main.
+        # Reinstalling from the v4.3.0 tree pins them to this release; it
+        # is normally a no-op, so keep it quiet.
+        run: pip install --no-cache-dir -q -r zephyrproject/zephyr/scripts/requirements.txt
+
+      - name: Generate version file
+        run: ./GIT-VERSION-GEN
+
+      - name: Build app
+        run: make app BOARD="${BOARD}"
+
+      - name: Build blinky
+        run: make blinky BOARD="${BOARD}"
+
+      - name: Collect release artifacts
+        # The Makefile's build dir is build.<board>/<soc>/<cpucluster>.
+        run: |
+          set -eu
+          BUILD_DIR="build.${BOARD}/rp2350b/m33"
+          install -d artifacts
+          install -m 644 "${BUILD_DIR}/app/zephyr/zephyr.hex" artifacts/bento_app.hex
+          install -m 644 "${BUILD_DIR}/blinky/zephyr/zephyr.hex" artifacts/bento_blinky.hex
+          ls -l artifacts
+
+      - name: Archive release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bento2-hex
+          path: |
+            artifacts/bento_app.hex
+            artifacts/bento_blinky.hex
+          if-no-files-found: error
+
+      - name: Attach artifacts to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/bento_app.hex
+            artifacts/bento_blinky.hex
