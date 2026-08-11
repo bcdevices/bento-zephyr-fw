@@ -1,6 +1,11 @@
 name: bento-fw
 build:
-  cmake: .
-  kconfig: Kconfig
+  settings:
+    # This repo contributes boards only (boards/blueclover/*), no module
+    # code, so there is no root CMakeLists.txt or Kconfig to point at.
+    # Registering the board root lets Zephyr find the boards when the repo
+    # is used as a module, which is how CI builds it.
+    board_root: .
+# Twister-only board root; must be a list of paths.
 boards:
-  root: .
+  - .
