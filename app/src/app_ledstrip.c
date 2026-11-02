@@ -5,14 +5,12 @@
 //
 
 /*
- * app_ledstrip.c - WS2812 RGB LED control on the Bento boards.
+ * app_ledstrip.c - WS2812 RGB LED control on the Bento board.
  *
  * Drives the LTST-E683CEGBW WS2812-compatible RGB LED through Zephyr's
  * WS2812 PIO led_strip driver via the "led-strip" devicetree alias. On
- * Bento2 the LED 5V rail is gated by the relay_5v boot-on regulator (so no
+ * Bento the LED 5V rail is gated by the relay_5v boot-on regulator (so no
  * GPIO power-enable is needed here); the data pin is GPIO14 (low GPIO bank).
- * On Bento1 the data pin is GPIO36 (high bank); the RP2350 PIO GPIOBASE is
- * relocated inside the driver (see patches/zephyr/0001-...).
  */
 
 #include <zephyr/kernel.h>

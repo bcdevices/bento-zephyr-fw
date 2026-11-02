@@ -26,7 +26,7 @@ the PIO window, so the LED never lights.
 
 All RP2350-specific code is guarded by `CONFIG_SOC_SERIES_RP2350`, so other
 SoCs are unaffected. Because GPIOBASE is chosen dynamically, the same driver
-works for both the high-bank (Bento1) and low-bank (Bento2) data pins.
+works for both high-bank (PER-401) and low-bank (Bento) data pins.
 
 ## 0002-udc-rpi-pico-fix-suspend-resume-ordering-race.patch
 

@@ -17,15 +17,15 @@
 #include "bento-pinctrl.dtsi"
 
 / {
-	model = "Blue Clover Bento Demo Board";
+	model = "Blue Clover Bento Demo Board (SUB-00156)";
 	compatible = "blueclover,bento";
 
 	chosen {
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,flash-controller = &qmi;
-		zephyr,console = &uart0;
-		zephyr,shell-uart = &uart0;
+		zephyr,console = &uart1;
+		zephyr,shell-uart = &uart1;
 		zephyr,code-partition = &code_partition;
 	};
 
@@ -35,14 +35,42 @@
 		pwm-buzzer = &pwm;
 	};
 
-	/* RGB_5V_IN power enable via relay on GPIO35 (RP_S1 / RELAY_S_IN) */
+	/*
+	 * RGB_5V_IN power enable via signal relay (ULN2803 + K1).
+	 * Driven by RP_S1 = GPIO35 (RELAY_S_IN, chip pin 44). The Darlington
+	 * inverts, so the relay coil energizes when the GPIO is low at the
+	 * MCU.
+	 */
 	relay_5v: relay-5v {
 		compatible = "regulator-fixed";
 		regulator-name = "relay_5v";
 		enable-gpios = <&gpio0_hi 3 GPIO_ACTIVE_LOW>;
 		regulator-boot-on;
 	};
+
 };
+
+/*
+ * mikroBUS click socket summary (discrete GPIOs only; SPI, I2C, UART
+ * and PWM are exposed through their bus controllers above):
+ *
+ *   Click pin   Signal         RP2350 GPIO
+ *   ---------   ------------   -----------
+ *   AN          AN1            GP40 (ADC0)
+ *   RST         click reset    GP34 (RP_S0)
+ *   CS          SPI chip sel   GP6  (RP_RTS1 net-aliased to CS_RTS1)
+ *   INT         click IRQ      GP7  (RP_CTS1 net-aliased to INT_CTS1)
+ *   PWM         PWM1           GP31 (RP_PWM1, PWM channel 7B)
+ *   RX/TX       UART1          GP4 (TX1) / GP5 (RX1)
+ *   SCK/MISO/MOSI  SPI1        GP10 / GP8 / GP11
+ *   SDA/SCL     I2C0           GP20 / GP21
+ *
+ * Note: GP6/GP7 carry both the UART1 RTS/CTS signals and the click
+ * CS/INT lines via shared net naming on sheet 1. With UART1 hw flow
+ * control enabled, the application should NOT also drive these as
+ * GPIOs; either repurpose UART1 or accept that the click cannot use
+ * its CS/INT lines.
+ */
 
 &flash0 {
 	reg = <0x10000000 DT_SIZE_M(4)>;
@@ -68,10 +96,28 @@
 	};
 };
 
+/* UART0: general-purpose UART on GP12/GP13 (SCI3_TXD / SCI3_RXD). */
 &uart0 {
 	current-speed = <115200>;
 	status = "okay";
 	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+/*
+ * UART1: console and shell on GP4/GP5 (SCI1_TXD / SCI1_RXD, nets RP_TX1 /
+ * RP_RX1). These pins are also the mikroBUS click UART.
+ *
+ * Hardware flow control is intentionally NOT enabled. The CTS/RTS pins
+ * (GP6/GP7) are net-aliased on the mikroBUS socket as click CS / INT, and
+ * requiring CTS would stall all shell output when connected to the usual
+ * 3-wire (TX/RX/GND) serial adapter. See the mikroBUS comment block for
+ * the GP6/GP7 net-aliasing caveat.
+ */
+&uart1 {
+	current-speed = <115200>;
+	status = "okay";
+	pinctrl-0 = <&uart1_default>;
 	pinctrl-names = "default";
 };
 
@@ -83,6 +129,11 @@ gpio0_lo: &gpio0 {
 	status = "okay";
 };
 
+/*
+ * I2C0 (SENS_I2C): BME280-adjacent I2C, both Qwiic connectors and the
+ * mikroBUS click I2C pins share this bus. External 10k pull-ups on the
+ * Qwiic sheet hold SDA/SCL.
+ */
 &i2c0 {
 	clock-frequency = <I2C_BITRATE_STANDARD>;
 	pinctrl-0 = <&i2c0_default>;
@@ -91,13 +142,16 @@ gpio0_lo: &gpio0 {
 };
 
 /*
- * SPI0: BME280 environmental sensor (SENS_SPI)
- * SCK=GP6, TX(MOSI)=GP7, RX(MISO)=GP4, CS=GP5 (RP_SPIS_SS / CS_BME280)
+ * SPI1 (SENS_SPI): SCK=GP10, MOSI=GP11, MISO=GP8.
+ * BME280 CS=GP1, mikroBUS click CS=GP6 (CS_RTS1 net, shared with UART1
+ * RTS -- see mikroBUS comment block above).
+ * SUB-00156 wires the sensor SPI bus to the SPI1 hardware controller.
  */
-&spi0 {
-	pinctrl-0 = <&spi0_default>;
+&spi1 {
+	pinctrl-0 = <&spi1_default>;
 	pinctrl-names = "default";
-	cs-gpios = <&gpio0_lo 5 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio0_lo 1 GPIO_ACTIVE_LOW>,
+		   <&gpio0_lo 6 GPIO_ACTIVE_LOW>;
 	status = "okay";
 
 	bme280: bme280@0 {
@@ -107,11 +161,62 @@ gpio0_lo: &gpio0 {
 	};
 };
 
-/* PWM: buzzer driven via MMBT3904 on GP29 (AUDIO_IN), channel 6B */
+/*
+ * PWM peripheral. Channels used:
+ *   7A (GP30) -> buzzer AUDIO_IN
+ *   7B (GP31) -> mikroBUS PWM1
+ *
+ * RP_PWM2 (GP32, channel 8A) is NC on SUB-00156 REV00. Add the
+ * pwm_ch8a_default group from bento-pinctrl.dtsi here when the net is
+ * connected on a future revision.
+ */
 &pwm {
-	pinctrl-0 = <&pwm_ch6b_default>;
+	pinctrl-0 = <&pwm_ch7a_default>, <&pwm_ch7b_default>;
 	pinctrl-names = "default";
 	status = "okay";
+};
+
+/*
+ * ADC: channels 0..3 are wired to GP40..GP43 (RP2350B ADC AIN0..3).
+ * ADC0 is shared with mikroBUS AN1; the others are available on test
+ * points / expansion use.
+ */
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@2 {
+		reg = <2>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@3 {
+		reg = <3>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
 };
 
 &timer0 {
@@ -127,8 +232,14 @@ zephyr_udc0: &usbd {
 };
 
 /*
+ * SCI2 (RP_TX2/RX2/CTS2/RTS2 on GP16/17/18/19) is NC on SUB-00156
+ * REV00. RP2350 only has two hardware UART controllers; a future SCI2
+ * connection would need a PIO-based UART instead of a third &uart node.
+ */
+
+/*
  * PIO1 drives the WS2812-compatible RGB LED (LTST-E683CEGBW) via a
- * SN74LVC1G125 level shifter on GPIO36 (RP_S2 / RGB_D_IN).
+ * SN74LVC1G125 level shifter on GPIO14 (RP_S2 / RGB_D_IN).
  */
 &pio1 {
 	status = "okay";
@@ -142,7 +253,7 @@ zephyr_udc0: &usbd {
 
 		ws2812: ws2812 {
 			status = "okay";
-			gpios = <&gpio0_hi 4 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
 			chain-length = <1>;
 			color-mapping = <LED_COLOR_ID_RED
 					 LED_COLOR_ID_GREEN

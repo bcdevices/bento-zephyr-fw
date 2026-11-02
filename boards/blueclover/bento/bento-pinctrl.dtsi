@@ -5,33 +5,64 @@
 
 #include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2350b-pinctrl.h>
 
-/*
- * Workaround: Zephyr's rp2350 pinctrl header defines UART0_TX_P18 and
- * UART0_RX_P19 using RP2_PINCTRL_GPIO_FUNC_UART_ALT, which is never
- * defined. The correct value is function 11 (UART_AUX).
- */
-#ifndef RP2_PINCTRL_GPIO_FUNC_UART_ALT
-#define RP2_PINCTRL_GPIO_FUNC_UART_ALT RP2_PINCTRL_GPIO_FUNC_UART_AUX
-#endif
-
 &pinctrl {
 	/*
-	 * UART0: TX=GP18 (SCI3_TXD / RP_TX0), RX=GP19 (SCI3_RXD / RP_RX0)
-	 * GP18/19 use the alternate UART function (function 11).
+	 * UART0 (console): TX=GP12 (SCI3_TXD / RP_TX0), RX=GP13 (SCI3_RXD /
+	 * RP_RX0). GP12/13 are the native UART0 pins (no alt-function needed).
 	 */
 	uart0_default: uart0_default {
 		group1 {
-			pinmux = <UART0_TX_P18>;
+			pinmux = <UART0_TX_P12>;
 		};
 		group2 {
-			pinmux = <UART0_RX_P19>;
+			pinmux = <UART0_RX_P13>;
 			input-enable;
 		};
 	};
 
 	/*
-	 * I2C0: SDA=GP20, SCL=GP21 (SENS_I2C / Qwiic)
-	 * Directly on the SENS_I2C bus shared with Qwiic connectors.
+	 * UART1 (console + shell, also the mikroBUS click UART):
+	 * TX=GP4 (SCI1_TXD / RP_TX1), RX=GP5 (SCI1_RXD / RP_RX1).
+	 *
+	 * Flow control is deliberately left out. The CTS/RTS pins would be
+	 * GP6 (SCI1_RTS / RP_RTS1) and GP7 (SCI1_CTS / RP_CTS1), but those
+	 * two pins are "double-duty" net-aliased on the mikroBUS click
+	 * socket as click CS / INT (sheet 1):
+	 *     RP_RTS1 (GP6) <-> CS_RTS1   -> click CS
+	 *     RP_CTS1 (GP7) <-> INT_CTS1  -> click INT
+	 * Leaving them unmuxed here keeps them available as GPIO for click
+	 * CS/INT, and avoids stalling console/shell output on a CTS line
+	 * that a 3-wire serial adapter never drives.
+	 *
+	 * Note on naming: the schematic labels GP6/GP7 with the "mirrored"
+	 * SCI/RTS-CTS naming so the click-side labels match. The native
+	 * RP2350 function on GP6 is UART1_CTS (input) and on GP7 is
+	 * UART1_RTS (output). To restore hardware flow control, add
+	 * <UART1_RTS_P7> to group1, <UART1_CTS_P6> to group2, and
+	 * hw-flow-control to the &uart1 node in the board DTS.
+	 */
+	uart1_default: uart1_default {
+		group1 {
+			pinmux = <UART1_TX_P4>;
+		};
+		group2 {
+			pinmux = <UART1_RX_P5>;
+			input-enable;
+		};
+	};
+
+	/*
+	 * SCI2 nets (RP_TX2/RX2/CTS2/RTS2 on GP16/17/18/19) are NC on
+	 * SUB-00156 REV00. Note that the RP2350 only has two hardware UART
+	 * controllers (UART0 and UART1), so a future SCI2 connection would
+	 * have to be served by a PIO-based UART implementation rather than
+	 * a third UART peripheral.
+	 */
+
+	/*
+	 * I2C0 (SENS_I2C): SDA=GP20, SCL=GP21.
+	 * Shared bus across BME280-adjacent I2C, both Qwiic connectors, and
+	 * the mikroBUS I2C pins.
 	 */
 	i2c0_default: i2c0_default {
 		group1 {
@@ -42,34 +73,54 @@
 	};
 
 	/*
-	 * SPI0: used for BME280 (SENS_SPI)
-	 * SCK=GP6, TX(MOSI)=GP7, RX(MISO)=GP4
-	 * CS is managed via GPIO (GP5 / RP_SPIS_SS) in the board DTS.
+	 * SPI1 (SENS_SPI): SCK=GP10, TX(MOSI)=GP11, RX(MISO)=GP8.
+	 * GP9 (RP_SPIS_SS) is the BME280 chip-select, driven as a GPIO.
+	 * SUB-00156 wires the sensor SPI bus to the SPI1 controller pins
+	 * (REV00 uses the SPI1 hardware block, not SPI0).
 	 */
-	spi0_default: spi0_default {
+	spi1_default: spi1_default {
 		group1 {
-			pinmux = <SPI0_SCK_P6>, <SPI0_TX_P7>;
+			pinmux = <SPI1_SCK_P10>, <SPI1_TX_P11>;
 		};
 		group2 {
-			pinmux = <SPI0_RX_P4>;
+			pinmux = <SPI1_RX_P8>;
 			input-enable;
 		};
 	};
 
-	/* PWM: buzzer on GP29 (AUDIO_IN -> RP_PWM0), channel 6B */
-	pwm_ch6b_default: pwm_ch6b_default {
+	/* Buzzer PWM: AUDIO_IN = GP30 (RP_PWM0 net), PWM channel 7A. */
+	pwm_ch7a_default: pwm_ch7a_default {
 		group1 {
-			pinmux = <PWM_6B_P29>;
+			pinmux = <PWM_7A_P30>;
+		};
+	};
+
+	/* mikroBUS PWM1: GP31 (RP_PWM1), PWM channel 7B. */
+	pwm_ch7b_default: pwm_ch7b_default {
+		group1 {
+			pinmux = <PWM_7B_P31>;
 		};
 	};
 
 	/*
-	 * PIO1 WS2812: RGB_D_IN driven from RP_S2 = GPIO36
-	 * Signal path: GPIO36 -> SN74LVC1G125 level shifter -> LTST-E683CEGBW
+	 * RP_PWM2 = GP32 (chip pin 40, PWM channel 8A) is NC on SUB-00156
+	 * REV00. Pinmux defined here for future use; the PWM peripheral
+	 * does not include this group in its pinctrl-0 list.
+	 *
+	 * pwm_ch8a_default: pwm_ch8a_default {
+	 *	group1 {
+	 *		pinmux = <PWM_8A_P32>;
+	 *	};
+	 * };
+	 */
+
+	/*
+	 * PIO1 WS2812: RGB_D_IN driven from RP_S2 = GPIO14.
+	 * Signal path: GPIO14 -> SN74LVC1G125 level shifter -> LTST-E683CEGBW
 	 */
 	pio1_ws2812_default: pio1_ws2812_default {
 		group1 {
-			pinmux = <PIO1_P36>;
+			pinmux = <PIO1_P14>;
 		};
 	};
 };

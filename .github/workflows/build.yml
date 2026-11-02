@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# Builds the Bento2 demo app and blinky, and archives the resulting hex
+# Builds the Bento demo app and blinky, and archives the resulting hex
 # images as bento_app.hex and bento_blinky.hex.
 #
 # This deliberately does NOT run inside the upstream zephyrprojectrtos/ci
@@ -13,7 +13,7 @@
 # only the arm-zephyr-eabi toolchain.
 #
 
-name: Build Bento2
+name: Build Bento
 
 on:
   push:
@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
 
 env:
-  BOARD: bento2
+  BOARD: bento
 
 jobs:
   build:
@@ -85,7 +85,7 @@ jobs:
       - name: Archive release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: bento2-hex
+          name: bento-hex
           path: |
             bento-zephyr-fw/artifacts/bento_app.hex
             bento-zephyr-fw/artifacts/bento_blinky.hex

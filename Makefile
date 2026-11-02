@@ -35,9 +35,8 @@ ZEPHYR_LOCALROOT := $(BASE_PATH)/zephyrproject/zephyr
 
 BOARD_ROOT := $(BASE_PATH)
 
-# Target board. Override on the command line to build a different board,
-# e.g. `make build BOARD=bento` for the original Bento1.
-BOARD ?= bento2
+# Target board. Override on the command line to build a different board.
+BOARD ?= bento
 
 BOARDS_APP :=
 BOARDS_APP += $(BOARD)/rp2350b/m33

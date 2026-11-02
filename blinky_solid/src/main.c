@@ -2,7 +2,7 @@
 //
 // Copyright (c) 2026 Blue Clover Devices
 //
-// Steady solid-color RGB LED demo for the Bento demo boards.
+// Steady solid-color RGB LED demo for the Bento demo board.
 //
 // Drives the LTST-E683CEGBW WS2812-compatible RGB LED through Zephyr's
 // WS2812 PIO led_strip driver (worldsemi,ws2812-rpi_pico-pio) via the

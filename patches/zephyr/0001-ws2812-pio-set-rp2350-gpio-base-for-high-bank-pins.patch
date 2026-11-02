@@ -28,7 +28,7 @@ index 7da2763da62..cea172d8519 100644
 +	/*
 +	 * Absolute GPIO number. DT_GPIO_PIN_BY_IDX returns the controller-
 +	 * relative pin (e.g. 4 for gpio0_hi pin 4); add the port offset
-+	 * (port_reg * 32) to reach e.g. GPIO36 (Bento1) or GPIO43 (PER-401).
++	 * (port_reg * 32) to reach e.g. GPIO43 (PER-401).
 +	 */
 +	uint gpio_pin = config->gpio_pin + config->gpio_port_offset;
 +
@@ -66,8 +66,8 @@ index 7da2763da62..cea172d8519 100644
 +	 * (0 -> GPIO 0-31, 16 -> GPIO 16-47). It must be set before loading the
 +	 * PIO program (the SDK rejects pio_set_gpio_base() once instruction
 +	 * memory is non-empty). config->gpio_base is computed at build time from
-+	 * the data pin: 16 reaches high-bank pins like GPIO36 (Bento1) / GPIO43
-+	 * (PER-401); 0 keeps low-bank pins like GPIO14 (Bento2) addressable.
++	 * the data pin: 16 reaches high-bank pins like GPIO43 (PER-401); 0 keeps
++	 * low-bank pins like GPIO14 (Bento) addressable.
 +	 */
 +	pio_set_gpio_base(pio, config->gpio_base);
 +#endif
@@ -87,7 +87,7 @@ index 7da2763da62..cea172d8519 100644
 +
 +/*
 + * RP2350 PIO GPIOBASE window origin for the strip data pin: 16 if the pin is
-+ * in the high bank (>= 32, e.g. GPIO36/GPIO43), else 0. The child strip node
++ * in the high bank (>= 32, e.g. GPIO43), else 0. The child strip node
 + * is named "ws2812" on these boards.
 + */
 +#define WS2812_PIO_GPIO_BASE(inst)                                                                  \

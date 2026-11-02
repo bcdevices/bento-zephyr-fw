@@ -2,16 +2,12 @@
 //
 // Copyright (c) 2026 Blue Clover Devices
 //
-// RGB LED demo for the Bento demo boards.
+// RGB LED demo for the Bento demo board.
 //
 // Drives the LTST-E683CEGBW WS2812-compatible RGB LED through Zephyr's
 // WS2812 PIO led_strip driver (worldsemi,ws2812-rpi_pico-pio) via the
-// "led-strip" devicetree alias. The data pin differs per board:
-//   - Bento1: GPIO36 (gpio0_hi pin 4, high GPIO bank)
-//   - Bento2: GPIO14 (gpio0_lo pin 14, low GPIO bank)
-// The high-bank pin needs the RP2350 PIO GPIOBASE relocated to 16; that is
-// handled inside the driver (see patches/zephyr/0001-...), so this example is
-// board-agnostic and just cycles the LED through a few colors.
+// "led-strip" devicetree alias. The data pin is GPIO14 (gpio0_lo pin 14, low
+// GPIO bank). This example just cycles the LED through a few colors.
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>

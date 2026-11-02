@@ -1,8 +1,8 @@
-# Bento2 GPIO Pin Map (SUB-00156 REV00)
+# Bento GPIO Pin Map (SUB-00156 REV00)
 
 Source: SUB-00156 REV00 Schematic 2026-04-23. Reflects the GPIO assignments
-encoded in `boards/blueclover/bento2/bento2_rp2350b_m33.dts` and
-`boards/blueclover/bento2/bento2-pinctrl.dtsi`.
+encoded in `boards/blueclover/bento/bento_rp2350b_m33.dts` and
+`boards/blueclover/bento/bento-pinctrl.dtsi`.
 
 | GPIO | Chip pin | Net                              | Function                                     | Where used                                |
 |------|----------|----------------------------------|----------------------------------------------|-------------------------------------------|

@@ -1,5 +1,5 @@
 /*
- * JLink script for post-flash run of RP2350B on Bento1.
+ * JLink script for post-flash run of RP2350B on Bento.
  *
  * Overrides ResetTarget with a pin-toggle so the RP2350 bootrom runs freely
  * without the debugger halting it before handoff to the application.
