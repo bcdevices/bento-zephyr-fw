@@ -7,9 +7,11 @@
 /*
  * blinky_uart_cmd.c - Minimal line-based commands on the console UART.
  *
- * For boards without a USB device controller, or without the RAM for the
- * Zephyr shell (e.g. STM32L011K4, 2 KB). Supports one command, `version`,
- * whose output matches the shell's `version` command (BLINKY_VERSION_LINES).
+ * Selected with BLINKY_SHELL=uart: for boards without a USB device controller,
+ * or without the RAM for the Zephyr shell (e.g. STM32L011K4, 2 KB), and for
+ * using a Nucleo's ST-LINK virtual COM port instead of a second USB cable.
+ * Supports one command, `version`, whose output matches the shell's `version`
+ * command (BLINKY_VERSION_LINES).
  *
  * The RX ISR echoes characters and assembles a line; on CR or LF it hands the
  * line to the main thread, which runs the command from blinky_cmd_wait()

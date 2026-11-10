@@ -8,7 +8,7 @@
  * vehicle for exercising the USB shell.
  *
  * Applied by CMakeLists.txt (as an EXTRA_DTC_OVERLAY_FILE, alongside
- * usb_shell.conf) to every board not listed in BLINKY_UART_CONSOLE_BOARDS.
+ * usb_shell.conf) when BLINKY_SHELL=usb, the default for boards with USB.
  * The board's DTS must label its USB device controller zephyr_udc0 (Bento,
  * nucleo_f439zi, ...). A boards/<board>.overlay, if present, is applied too.
  *

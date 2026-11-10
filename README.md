@@ -84,27 +84,38 @@ make flash-blinky BOARD=nucleo_f439zi  # west flash --runner openocd (on-board S
 make blinky BOARD=nucleo_l011k4
 ```
 
-| Board | LED | `version` command on | Console / logs |
+| Board | LED | Default `BLINKY_SHELL` | Console / logs |
 |---|---|---|---|
-| `bento` | WS2812 RGB (`led-strip`) | Zephyr shell, USB CDC-ACM | UART1 (GP4/GP5) |
-| `nucleo_f439zi` | LD1 (`led0`) | Zephyr shell, USB CDC-ACM on CN13 | ST-LINK VCP (USART3) |
-| `nucleo_l011k4` | PB3 (`led0`) | Minimal command, ST-LINK VCP (USART2) | ST-LINK VCP, printk only |
+| `bento` | WS2812 RGB (`led-strip`) | `usb` (USB CDC-ACM) | UART1 (GP4/GP5) |
+| `nucleo_f439zi` | LD1 (`led0`) | `usb` (CN13) | ST-LINK VCP (USART3) |
+| `nucleo_l011k4` | PB3 (`led0`) | `uart` only | ST-LINK VCP (USART2) |
 
 - The LED backend comes from the devicetree: a `led-strip` alias drives the
   WS2812 colour cycle; otherwise the `led0` GPIO LED toggles at 1 Hz.
-- The command transport is chosen in `blinky/CMakeLists.txt`. By default a
-  board gets the Zephyr shell over USB CDC-ACM (`usb_shell.conf` and
-  `usb_shell.overlay`; the board DTS must label its USB device controller
-  `zephyr_udc0`). Boards listed in `BLINKY_UART_CONSOLE_BOARDS` (no USB or too
-  little RAM for the shell) get `uart_console.conf` and
-  `src/blinky_uart_cmd.c`, which answer `version` on the console UART. Both
-  print identical `version` output, so a test plan can parse either.
+- The command transport is a build option, `BLINKY_SHELL`:
+  - `usb`: the Zephyr shell over USB CDC-ACM (`usb_shell.conf`,
+    `usb_shell.overlay`, `usb_shell/<board>.conf`). Needs a USB device
+    controller labelled `zephyr_udc0`. Logging is enabled and goes to the
+    console UART.
+  - `uart`: a minimal `version` command on the console UART
+    (`uart_console.conf`, `src/blinky_uart_cmd.c`). On a Nucleo that is the
+    ST-LINK virtual COM port, so one USB cable does programming and the
+    shell. No logging.
+
+  Both print identical `version` output, so a test plan can parse either.
+  Boards in `BLINKY_UART_ONLY_BOARDS` (`blinky/CMakeLists.txt`) always use
+  `uart`.
+
+  ```sh
+  make blinky BOARD=nucleo_f439zi BLINKY_SHELL=uart  # version on the ST-LINK VCP
+  ```
+
 - The console UART also prints `blinky <version> (build <git>) on <board>`
-  at boot. Shell builds also send `LOG_*` output there.
-- Per-board Kconfig lives in `blinky/boards/<board>.conf`. For a USB shell
-  board, set `CONFIG_CDC_ACM_SERIAL_PRODUCT_STRING` there. Set `BOARD_TARGET`
-  on the `make` command line if the Zephyr board target has SoC/CPU
-  qualifiers.
+  at boot.
+- Per-board Kconfig lives in `blinky/boards/<board>.conf`, and USB-shell-only
+  settings (e.g. `CONFIG_CDC_ACM_SERIAL_PRODUCT_STRING`) in
+  `blinky/usb_shell/<board>.conf`. Set `BOARD_TARGET` on the `make` command
+  line if the Zephyr board target has SoC/CPU qualifiers.
 
 `app` remains Bento-only.
 

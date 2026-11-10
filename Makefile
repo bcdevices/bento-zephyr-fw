@@ -85,14 +85,20 @@ build.%/app/zephyr/zephyr.hex: FORCE apply-patches
 	    --board $* -s app $(WEST_BOARD_ROOT) ; \
 	fi
 
+# BLINKY_SHELL=usb|uart selects blinky's command transport (see
+# blinky/CMakeLists.txt). When given, west is told to re-run CMake (--cmake),
+# since it otherwise ignores new CMake arguments for a configured build dir.
+BLINKY_WEST_ARGS := $(if $(BLINKY_SHELL),--cmake)
+BLINKY_CMAKE_ARGS := $(if $(BLINKY_SHELL),-DBLINKY_SHELL=$(BLINKY_SHELL))
+
 build.%/blinky/zephyr/zephyr.hex: FORCE apply-patches
-	@if [ -f build.$*/blinky/build.ninja ]; then \
+	@if [ -z "$(BLINKY_SHELL)" ] && [ -f build.$*/blinky/build.ninja ]; then \
 	  echo "ninja -C build.$*/blinky" ; \
 	  ninja -C build.$*/blinky ; \
 	else \
 	  $(source-zephyr) && \
-	  west build --build-dir build.$*/blinky --pristine auto \
-	    --board $* -s blinky $(WEST_BOARD_ROOT) ; \
+	  west build --build-dir build.$*/blinky --pristine auto $(BLINKY_WEST_ARGS) \
+	    --board $* -s blinky $(WEST_BOARD_ROOT) $(BLINKY_CMAKE_ARGS) ; \
 	fi
 
 .PHONY: versions

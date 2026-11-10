@@ -2,21 +2,46 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
-# Command transport. Most boards get the Zephyr shell over USB CDC-ACM
-# (usb_shell.conf + usb_shell.overlay). Boards with no USB device controller,
-# or too little RAM for the shell, get a minimal `version` command on the
-# console UART instead (uart_console.conf + src/blinky_uart_cmd.c). Both print
-# the same `version` output, so test plans can parse either.
-set(BLINKY_UART_CONSOLE_BOARDS
-  nucleo_l011k4   # STM32L011K4: no USB, 2 KB RAM; console = ST-LINK VCP
+# Command transport, selected with -DBLINKY_SHELL=usb|uart (or
+# `make blinky BLINKY_SHELL=...`). Both print the same `version` output, so
+# test plans can parse either.
+#
+# - usb:  Zephyr shell over USB CDC-ACM (usb_shell.conf, usb_shell.overlay,
+#         and usb_shell/<board>.conf if present). Needs a zephyr_udc0 USB
+#         device controller. Default for boards with USB.
+# - uart: minimal `version` command on the console UART (uart_console.conf,
+#         src/blinky_uart_cmd.c). On a Nucleo the console is the ST-LINK
+#         virtual COM port, so no second USB connection is needed.
+#
+# Boards in BLINKY_UART_ONLY_BOARDS have no USB device controller (or too
+# little RAM for the shell) and always use uart.
+set(BLINKY_UART_ONLY_BOARDS
+  nucleo_l011k4   # STM32L011K4: no USB, 2 KB RAM
 )
 string(REGEX REPLACE "[/@].*" "" blinky_board "${BOARD}")
-if(blinky_board IN_LIST BLINKY_UART_CONSOLE_BOARDS)
-  list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/uart_console.conf)
+if(blinky_board IN_LIST BLINKY_UART_ONLY_BOARDS)
+  set(blinky_shell_default uart)
 else()
-  list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/usb_shell.conf)
-  list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_SOURCE_DIR}/usb_shell.overlay)
+  set(blinky_shell_default usb)
 endif()
+set(BLINKY_SHELL ${blinky_shell_default} CACHE STRING "blinky command transport: usb or uart")
+set_property(CACHE BLINKY_SHELL PROPERTY STRINGS usb uart)
+
+if(BLINKY_SHELL STREQUAL "uart")
+  list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/uart_console.conf)
+elseif(BLINKY_SHELL STREQUAL "usb")
+  if(blinky_board IN_LIST BLINKY_UART_ONLY_BOARDS)
+    message(FATAL_ERROR "blinky: ${blinky_board} has no USB shell support; use BLINKY_SHELL=uart")
+  endif()
+  list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/usb_shell.conf)
+  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/usb_shell/${blinky_board}.conf)
+    list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/usb_shell/${blinky_board}.conf)
+  endif()
+  list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_SOURCE_DIR}/usb_shell.overlay)
+else()
+  message(FATAL_ERROR "blinky: BLINKY_SHELL must be usb or uart, not '${BLINKY_SHELL}'")
+endif()
+message(STATUS "blinky: BLINKY_SHELL=${BLINKY_SHELL}")
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(bento_blinky)
