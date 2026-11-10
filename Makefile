@@ -36,10 +36,20 @@ ZEPHYR_LOCALROOT := $(BASE_PATH)/zephyrproject/zephyr
 BOARD_ROOT := $(BASE_PATH)
 
 # Target board. Override on the command line to build a different board.
+# `app` is Bento-only; `blinky` also builds for demo boards with a led0 alias
+# and a zephyr_udc0 USB device controller, e.g.:
+#   make blinky BOARD=nucleo_f439zi
 BOARD ?= bento
 
+# Zephyr board target (board/soc/cpucluster) for BOARD.
+ifeq ($(BOARD),bento)
+BOARD_TARGET := bento/rp2350b/m33
+else
+BOARD_TARGET ?= $(BOARD)
+endif
+
 BOARDS_APP :=
-BOARDS_APP += $(BOARD)/rp2350b/m33
+BOARDS_APP += $(BOARD_TARGET)
 
 # Build directory for the selected board (matches west --build-dir below).
 BUILD_DIR := build.$(strip $(BOARDS_APP))
@@ -109,9 +119,18 @@ endef
 flash: $(APP_TARGETS)
 	$(call jlink-flash-and-run,$(BASE_PATH)/$(BUILD_DIR)/app/zephyr/zephyr.hex)
 
+# Bento flashes through J-Link; other boards use west flash with
+# WEST_RUNNER (default openocd, which drives a Nucleo's on-board ST-LINK
+# without STM32CubeProgrammer). Override, e.g. WEST_RUNNER=stm32cubeprogrammer.
+WEST_RUNNER ?= openocd
+
 .PHONY: flash-blinky
 flash-blinky: $(BLINKY_TARGETS)
+ifeq ($(BOARD),bento)
 	$(call jlink-flash-and-run,$(BASE_PATH)/$(BUILD_DIR)/blinky/zephyr/zephyr.hex)
+else
+	$(source-zephyr) && west flash --build-dir $(BUILD_DIR)/blinky --runner $(WEST_RUNNER)
+endif
 
 .PHONY: build app
 build app: $(APP_TARGETS)

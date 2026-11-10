@@ -7,12 +7,14 @@
  * mirroring app/app.overlay so blinky can be used as the lighter-weight
  * vehicle for exercising the USB shell.
  *
- * The filename matters: Zephyr auto-applies `app.overlay` from the
- * application source directory. A differently-named overlay is silently
- * ignored, which would leave the shell on the UART with a clean build.
+ * Applied by CMakeLists.txt (as an EXTRA_DTC_OVERLAY_FILE, alongside
+ * usb_shell.conf) to every board not listed in BLINKY_UART_CONSOLE_BOARDS.
+ * The board's DTS must label its USB device controller zephyr_udc0 (Bento,
+ * nucleo_f439zi, ...). A boards/<board>.overlay, if present, is applied too.
  *
- * The console (zephyr,console) deliberately stays on the physical UART
- * (&uart1, GP4/GP5 = RP_TX1/RP_RX1, in the board DTS): keeping boot banners,
+ * The console (zephyr,console) deliberately stays on the board's physical UART
+ * (Bento: &uart1, GP4/GP5 = RP_TX1/RP_RX1; nucleo_f439zi: &usart3, the
+ * ST-LINK virtual COM port), as set in the board DTS: keeping boot banners,
  * logs and any fault output on a transport that does not depend on USB
  * enumeration means a USB-side wedge is still diagnosable over the wire.
  *

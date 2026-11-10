@@ -1,6 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.20.0)
+
+# Command transport. Most boards get the Zephyr shell over USB CDC-ACM
+# (usb_shell.conf + usb_shell.overlay). Boards with no USB device controller,
+# or too little RAM for the shell, get a minimal `version` command on the
+# console UART instead (uart_console.conf + src/blinky_uart_cmd.c). Both print
+# the same `version` output, so test plans can parse either.
+set(BLINKY_UART_CONSOLE_BOARDS
+  nucleo_l011k4   # STM32L011K4: no USB, 2 KB RAM; console = ST-LINK VCP
+)
+string(REGEX REPLACE "[/@].*" "" blinky_board "${BOARD}")
+if(blinky_board IN_LIST BLINKY_UART_CONSOLE_BOARDS)
+  list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/uart_console.conf)
+else()
+  list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/usb_shell.conf)
+  list(APPEND EXTRA_DTC_OVERLAY_FILE ${CMAKE_CURRENT_SOURCE_DIR}/usb_shell.overlay)
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(bento_blinky)
 
@@ -31,4 +48,8 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/VERSION)
 endif()
 
 target_sources(app PRIVATE src/main.c)
-target_sources_ifdef(CONFIG_SHELL app PRIVATE src/blinky_shell.c)
+if(CONFIG_SHELL)
+  target_sources(app PRIVATE src/blinky_shell.c)
+else()
+  target_sources(app PRIVATE src/blinky_uart_cmd.c)
+endif()

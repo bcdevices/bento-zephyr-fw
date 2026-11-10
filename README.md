@@ -73,6 +73,41 @@ Flashing with J-Link:
 west flash --build-dir sub3-zephyr-fw/build.bento/rp2350b/m33/blinky --runner jlink --reset
 ```
 
+### Blinky on other demo boards
+
+`blinky` also builds for other Zephyr boards, so the same demo (LED blink and
+a `version` command) can be used with demo projects:
+
+```sh
+make blinky BOARD=nucleo_f439zi        # -> build.nucleo_f439zi/blinky/zephyr/zephyr.hex
+make flash-blinky BOARD=nucleo_f439zi  # west flash --runner openocd (on-board ST-LINK)
+make blinky BOARD=nucleo_l011k4
+```
+
+| Board | LED | `version` command on | Console / logs |
+|---|---|---|---|
+| `bento` | WS2812 RGB (`led-strip`) | Zephyr shell, USB CDC-ACM | UART1 (GP4/GP5) |
+| `nucleo_f439zi` | LD1 (`led0`) | Zephyr shell, USB CDC-ACM on CN13 | ST-LINK VCP (USART3) |
+| `nucleo_l011k4` | PB3 (`led0`) | Minimal command, ST-LINK VCP (USART2) | ST-LINK VCP, printk only |
+
+- The LED backend comes from the devicetree: a `led-strip` alias drives the
+  WS2812 colour cycle; otherwise the `led0` GPIO LED toggles at 1 Hz.
+- The command transport is chosen in `blinky/CMakeLists.txt`. By default a
+  board gets the Zephyr shell over USB CDC-ACM (`usb_shell.conf` and
+  `usb_shell.overlay`; the board DTS must label its USB device controller
+  `zephyr_udc0`). Boards listed in `BLINKY_UART_CONSOLE_BOARDS` (no USB or too
+  little RAM for the shell) get `uart_console.conf` and
+  `src/blinky_uart_cmd.c`, which answer `version` on the console UART. Both
+  print identical `version` output, so a test plan can parse either.
+- The console UART also prints `blinky <version> (build <git>) on <board>`
+  at boot. Shell builds also send `LOG_*` output there.
+- Per-board Kconfig lives in `blinky/boards/<board>.conf`. For a USB shell
+  board, set `CONFIG_CDC_ACM_SERIAL_PRODUCT_STRING` there. Set `BOARD_TARGET`
+  on the `make` command line if the Zephyr board target has SoC/CPU
+  qualifiers.
+
+`app` remains Bento-only.
+
 ### Versioning
 
 `app` and `blinky` are versioned independently, each from a `VERSION` file in
