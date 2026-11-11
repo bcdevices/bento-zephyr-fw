@@ -22,13 +22,15 @@ manifest:
       remote: upstream
       revision: v4.3.0
       import:
-        # Only the modules needed to build for the RP2350B board. Importing
+        # Only the modules needed to build for the RP2350B (Bento) and the
+        # STM32 demo boards (blinky only). Importing
         # the full module list pulls in every vendor HAL, which is a large
         # download and is what exhausts the runner's disk.
         name-allowlist:
           - cmsis
           - cmsis_6
           - hal_rpi_pico
+          - hal_stm32
           - picolibc
 
   self:
