@@ -29,6 +29,11 @@ on:
 
 env:
   BOARD: bento
+  # Select the Zephyr SDK installed by action-zephyr-setup explicitly. Left
+  # unset, Zephyr 4.3.0's FindZephyr-sdk.cmake expands it unquoted into an
+  # if() (`"zephyr" STREQUAL ${ZEPHYR_TOOLCHAIN_VARIANT}`), which CMake 4.x
+  # rejects with "Unknown arguments specified".
+  ZEPHYR_TOOLCHAIN_VARIANT: zephyr
 
 jobs:
   build:
