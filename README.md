@@ -119,6 +119,45 @@ make blinky BOARD=nucleo_l011k4
 
 `app` remains Bento-only.
 
+### App shell commands
+
+The `app` image's USB CDC-ACM shell (prompt `bento:~$`) has a `bento` command
+for the board peripherals:
+
+```sh
+bento buzzer beep [freq_hz] [duration_ms]
+bento buzzer sweep                           # startup note sweep
+bento buzzer play [twinkle | ode | "<rtttl>"]
+bento ledstrip set <r> <g> <b>               # 0..255 each
+bento ledstrip off
+bento sensor read                            # BME280
+```
+
+`bento buzzer play` plays a built-in tune (`twinkle`, the default, or `ode`)
+or a quoted [RTTTL](https://en.wikipedia.org/wiki/Ring_Tone_Text_Transfer_Language)
+string. Any argument containing `:` is treated as RTTTL. The command blocks
+until the tune ends, then prints `played <n> notes`, where `n` includes
+rests.
+
+```sh
+bento:~$ bento buzzer play "scale:d=8,o=5,b=180:c,d,e,f,g,a,b,c6"
+played 8 notes
+```
+
+- The tune is parsed in full before playback, so a malformed string only
+  prints `bad rtttl: <reason> at char <pos>`. The grammar is documented in
+  `app/src/rtttl.h`.
+- `CONFIG_SHELL_CMD_BUFF_SIZE=512` limits a command line to roughly 100
+  notes. The RX ring buffer is the same size, so a host can send a whole
+  tune in one write. The parser accepts at most 256 notes.
+
+The RTTTL parser has no Zephyr dependencies, and its unit tests run on the
+host:
+
+```sh
+make test
+```
+
 ### Versioning
 
 `app` and `blinky` are versioned independently, each from a `VERSION` file in
