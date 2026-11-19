@@ -33,6 +33,7 @@ endif()
 target_sources(app PRIVATE
   src/main.c
   src/app_buzzer.c
+  src/rtttl.c
   src/app_sensor.c
   src/app_ledstrip.c
   src/app_shell.c

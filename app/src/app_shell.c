@@ -15,6 +15,7 @@
  */
 
 #include <stdlib.h>
+#include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
@@ -71,12 +72,92 @@ static int cmd_buzzer_sweep(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/*
+ * Tunes built into the firmware, played by name ("bento buzzer play ode").
+ * The first one is played when no argument is given.
+ */
+static const struct {
+	const char *name;
+	const char *rtttl;
+} builtin_tunes[] = {
+	/* "Twinkle, Twinkle, Little Star", first line (traditional). 14 notes, 8 s. */
+	{ "twinkle", "twinkle:d=4,o=5,b=120:c,c,g,g,a,a,2g,f,f,e,e,d,d,2c" },
+	/* Beethoven, "Ode to Joy", opening (public domain). 15 notes, 7 s. */
+	{ "ode", "ode:d=4,o=5,b=140:e,e,f,g,g,f,e,d,c,c,d,e,e.,8d,2d" },
+};
+
+/* Resolve the play argument: RTTTL if it has a ':', else a built-in name. */
+static const char *find_tune(const char *arg)
+{
+	if (arg == NULL) {
+		return builtin_tunes[0].rtttl;
+	}
+	if (strchr(arg, ':') != NULL) {
+		return arg;
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(builtin_tunes); i++) {
+		if (strcmp(arg, builtin_tunes[i].name) == 0) {
+			return builtin_tunes[i].rtttl;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * Parsed notes for "bento buzzer play". Static rather than on the shell
+ * thread's stack; the shell runs one command at a time. A full command
+ * line (CONFIG_SHELL_CMD_BUFF_SIZE) of the shortest notes ("c,") fits.
+ */
+#define TUNE_MAX_NOTES 256
+static struct rtttl_note tune_notes[TUNE_MAX_NOTES];
+
+static int cmd_buzzer_play(const struct shell *sh, size_t argc, char **argv)
+{
+	const char *tune = find_tune((argc >= 2) ? argv[1] : NULL);
+	struct rtttl_error err = { 0 };
+	int count;
+	int rc;
+
+	if (tune == NULL) {
+		shell_error(sh, "unknown tune '%s'; built-in tunes:", argv[1]);
+		for (size_t i = 0; i < ARRAY_SIZE(builtin_tunes); i++) {
+			shell_error(sh, "  %s", builtin_tunes[i].name);
+		}
+		return -ENOENT;
+	}
+
+	/* Parse the whole tune first, so a bad string plays nothing. */
+	count = rtttl_parse(tune, tune_notes, ARRAY_SIZE(tune_notes), &err);
+	if (count < 0) {
+		shell_error(sh, "bad rtttl: %s at char %u", err.msg,
+			    (unsigned int)err.pos);
+		return count;
+	}
+
+	rc = app_buzzer_play(tune_notes, (size_t)count);
+	if (rc) {
+		shell_error(sh, "play failed: %d", rc);
+		return rc;
+	}
+
+	/* count includes pauses: every RTTTL entry is a note. */
+	shell_print(sh, "played %d notes", count);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_buzzer,
 	SHELL_CMD_ARG(beep, NULL,
 		"Sound the buzzer.\n"
 		"Usage: bento buzzer beep [freq_hz] [duration_ms]",
 		cmd_buzzer_beep, 1, 2),
 	SHELL_CMD(sweep, NULL, "Play the startup note sweep.", cmd_buzzer_sweep),
+	SHELL_CMD_ARG(play, NULL,
+		"Play a tune; blocks until it finishes.\n"
+		"Usage: bento buzzer play [twinkle | ode | \"<rtttl>\"]\n"
+		"  <rtttl>  e.g. \"name:d=4,o=5,b=120:c,d,e\" (quote it)\n"
+		"With no argument, plays twinkle.\n"
+		"Prints \"played <n> notes\"; n counts pauses (p) too.",
+		cmd_buzzer_play, 1, 1),
 	SHELL_SUBCMD_SET_END
 );
 

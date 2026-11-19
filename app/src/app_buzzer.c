@@ -9,6 +9,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/sys/util.h>
 
 #include "app_buzzer.h"
 
@@ -26,6 +27,10 @@
 /* Startup note-sweep timing: per-note tone length and inter-note gap. */
 #define SWEEP_NOTE_MS  120U
 #define PAUSE_DURATION K_MSEC(40)
+
+/* Tune playback: silent gap at the end of each note, 1/10 of it, capped. */
+#define NOTE_GAP_DIVISOR 10U
+#define NOTE_GAP_MAX_MS  30U
 
 static const struct device *const buzzer_pwm = DEVICE_DT_GET(BUZZER_PWM_NODE);
 
@@ -49,9 +54,28 @@ int app_buzzer_setup(void)
 	return 0;
 }
 
+/* Start a 50% duty tone. Leaves the PWM running until tone_off(). */
+static int tone_on(uint32_t freq_hz)
+{
+	uint32_t period_us = 1000000U / freq_hz;
+	int rc;
+
+	rc = pwm_set(buzzer_pwm, BUZZER_PWM_CHANNEL,
+		     PWM_USEC(period_us), PWM_USEC(period_us / 2U), 0);
+	if (rc) {
+		printk("Buzzer PWM set failed: %d\n", rc);
+	}
+	return rc;
+}
+
+static int tone_off(uint32_t freq_hz)
+{
+	return pwm_set(buzzer_pwm, BUZZER_PWM_CHANNEL,
+		       PWM_USEC(1000000U / freq_hz), 0, 0);
+}
+
 int app_buzzer_beep(uint32_t freq_hz, uint32_t duration_ms)
 {
-	uint32_t period_us;
 	int rc;
 
 	if (!device_is_ready(buzzer_pwm)) {
@@ -62,20 +86,53 @@ int app_buzzer_beep(uint32_t freq_hz, uint32_t duration_ms)
 		return -EINVAL;
 	}
 
-	period_us = 1000000U / freq_hz;
-
-	/* 50% duty cycle tone. */
-	rc = pwm_set(buzzer_pwm, BUZZER_PWM_CHANNEL,
-		     PWM_USEC(period_us), PWM_USEC(period_us / 2U), 0);
+	rc = tone_on(freq_hz);
 	if (rc) {
-		printk("Buzzer PWM set failed: %d\n", rc);
 		return rc;
 	}
 
 	k_sleep(K_MSEC(duration_ms));
 
-	/* Silence. */
-	return pwm_set(buzzer_pwm, BUZZER_PWM_CHANNEL, PWM_USEC(period_us), 0, 0);
+	return tone_off(freq_hz);
+}
+
+int app_buzzer_play(const struct rtttl_note *notes, size_t count)
+{
+	int rc;
+
+	if (!device_is_ready(buzzer_pwm)) {
+		return -ENODEV;
+	}
+
+	for (size_t i = 0; i < count; i++) {
+		uint32_t ms = notes[i].duration_ms;
+		uint32_t freq = notes[i].freq_hz;
+		uint32_t gap;
+
+		if (freq == 0U) {
+			k_sleep(K_MSEC(ms));
+			continue;
+		}
+
+		/*
+		 * Cut each tone short by a small gap so repeated notes
+		 * (e.g. "c,c") are heard as two notes, not one long one.
+		 */
+		gap = MIN(ms / NOTE_GAP_DIVISOR, NOTE_GAP_MAX_MS);
+
+		rc = tone_on(freq);
+		if (rc) {
+			return rc;
+		}
+		k_sleep(K_MSEC(ms - gap));
+		rc = tone_off(freq);
+		if (rc) {
+			return rc;
+		}
+		k_sleep(K_MSEC(gap));
+	}
+
+	return 0;
 }
 
 int app_buzzer_startup_sweep(void)

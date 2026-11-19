@@ -101,6 +101,17 @@ build.%/blinky/zephyr/zephyr.hex: FORCE apply-patches
 	    --board $* -s blinky $(WEST_BOARD_ROOT) $(BLINKY_CMAKE_ARGS) ; \
 	fi
 
+# Host unit tests for hardware-independent code (no Zephyr needed).
+HOST_CC ?= cc
+HOST_TEST_CFLAGS := -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined
+
+.PHONY: test
+test:
+	@mkdir -p build.host-test
+	$(HOST_CC) $(HOST_TEST_CFLAGS) -Iapp/src -o build.host-test/test_rtttl \
+	  tests/rtttl/test_rtttl.c app/src/rtttl.c
+	./build.host-test/test_rtttl
+
 .PHONY: versions
 versions:
 	@echo "GIT_DESC: $(GIT_DESC)"
